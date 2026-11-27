@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, Currency, calculate
+from goat.market import Gift, Listing, PORTALS_DEFAULT_FEES, listing_analysis
 
 
 class Preferences(BaseModel):
@@ -22,7 +23,7 @@ class Preferences(BaseModel):
     frequency_minutes: int = Field(default=15, ge=1, le=1440)
     quiet_start: int | None = Field(default=None, ge=0, le=23)
     quiet_end: int | None = Field(default=None, ge=0, le=23)
-    signals: bool = False
+    signals: bool = True
     marketing: bool = False
     reminders: bool = True
 
@@ -70,7 +71,7 @@ async def signals(conn, prefs: Preferences, history=False):
 async def catalog(conn, search=""):
     query_text = search.strip()[:80]
     entries = await rows(conn, """
-        select l.market,l.external_id,l.price,l.currency,l.url,l.transferable_at,l.observed_at,
+        select l.market,l.external_id,l.price,l.currency,l.url,l.transferable_at,l.observed_at,l.floor,
                g.id,g.collection,g.number,g.title,g.model,g.backdrop,g.symbol,g.rarity,g.image
         from market_listings l join gifts g on g.id=l.gift_id
         where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
@@ -79,18 +80,17 @@ async def catalog(conn, search=""):
                or g.symbol ilike '%'||:search||'%' or cast(g.number as text)=:search)
         order by l.price asc,l.observed_at desc limit 120
     """, search=query_text)
+    fee = await scalar(conn, "select fees from marketplace_fees where market='Portals'")
+    listings = []
+    for row in entries:
+        gift = Gift(**{field: row[field] for field in Gift.__dataclass_fields__})
+        listings.append(Listing(row["market"], row["external_id"], gift, row["price"], row["currency"],
+                                row["url"], row["transferable_at"], row["floor"]))
     return [{
         "id": f"catalog:{row['market']}:{row['external_id']}", "strategy": "floor", "state": "listed",
-        "observed_at": row["observed_at"], "details": {
-            "id": row["id"], "collection": row["collection"], "number": row["number"],
-            "title": row["title"], "model": row["model"], "backdrop": row["backdrop"],
-            "symbol": row["symbol"], "rarity": row["rarity"], "image": row["image"],
-            "purchase": row["price"], "sale": row["price"], "cost": row["price"],
-            "proceeds": row["price"], "profit": "0", "roi": "0", "currency": row["currency"],
-            "market": row["market"], "exit_market": row["market"], "url": row["url"],
-            "transferable_at": row["transferable_at"], "liquidity": 0, "history": [],
-            "risk": "Цена получена из Portals и может измениться до покупки.",
-        }} for row in entries]
+        "observed_at": row["observed_at"],
+        "details": listing_analysis(item, listings, fee or PORTALS_DEFAULT_FEES),
+    } for row, item in zip(entries, listings, strict=True)]
 
 
 def demo():
