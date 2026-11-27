@@ -111,19 +111,22 @@ function App(){
  const [advancedPrefs,setAdvancedPrefs]=useState(false)
  const [search,setSearch]=useState('')
  const [searchInput,setSearchInput]=useState('')
+ const [scannerMode,setScannerMode]=useState<'opportunities'|'market'>('opportunities')
+ const [catalogPage,setCatalogPage]=useState(1)
+ const [catalogHasMore,setCatalogHasMore]=useState(false)
  const [busy,setBusy]=useState(false)
  const [pendingVerify,setPendingVerify]=useState<string>()
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
  const loadItems=async()=>setItems(await api<Item[]>('/portfolio'))
  const liveFeed=async()=>setLive(await api<Signal[]>('/signals'))
- const catalogFeed=async(q='')=>setCatalogItems(await api<Signal[]>('/catalog'+(q?'?q='+encodeURIComponent(q):'')))
+ const catalogFeed=async(q='',page=1)=>{const params=new URLSearchParams({offset:String((page-1)*60),limit:'60'});if(q)params.set('q',q);const data=await api<Signal[]>('/catalog?'+params);setCatalogItems(data);setCatalogPage(page);setCatalogHasMore(data.length===60)}
  const announce=(e:unknown)=>setToast(e instanceof Error?e.message:String(e))
  const change=(name:string)=>{tg?.HapticFeedback?.selectionChanged();setPage(name);setFilter('all');setMarket('all');window.scrollTo(0,0)}
  const run=async(task:()=>Promise<void>)=>{if(busy)return;setBusy(true);try{await task()}catch(e){announce(e)}finally{setBusy(false)}}
  useEffect(()=>{
   tg?.ready();tg?.expand()
   Promise.allSettled([api<Signal[]>('/demo').then(setSamples),api<Market[]>('/market-status').then(setMarkets),
-   ...(auth?[loadMe().then(profile=>profile.active?Promise.all([liveFeed(),catalogFeed()]):undefined),loadItems()]:[])])
+   ...(auth?[loadMe().then(profile=>profile.active?liveFeed():undefined),loadItems()]:[])])
    .then(results=>{const failure=results.find(result=>result.status==='rejected');if(failure?.status==='rejected')announce(failure.reason)})
    .finally(()=>setLoading(false))
  },[])
@@ -131,7 +134,7 @@ function App(){
  useEffect(()=>{if(!toast)return;const id=window.setTimeout(()=>setToast(''),4800);return()=>clearTimeout(id)},[toast])
  useEffect(()=>{
   if(!me?.active)return
-  const id=window.setInterval(()=>{void liveFeed().catch(()=>setLive([]));void catalogFeed().catch(()=>setCatalogItems([]));void api<Market[]>('/market-status').then(setMarkets).catch(()=>{})},30000)
+  const id=window.setInterval(()=>{void liveFeed().catch(()=>setLive([]));void api<Market[]>('/market-status').then(setMarkets).catch(()=>{})},30000)
   return()=>clearInterval(id)
  },[me?.active])
  useEffect(()=>{
@@ -149,7 +152,7 @@ function App(){
  },[page,period,me?.active])
  const isDemo=!me?.active
  const source=isDemo?samples:live
- const searchable=isDemo?samples:(catalogItems.length?catalogItems:live)
+ const searchable=isDemo?samples:(scannerMode==='opportunities'?live:catalogItems)
  const display=useMemo(()=>searchable.filter(s=>{
     const q=search.trim().toLocaleLowerCase('ru-RU')
     const haystack=[s.details.title,s.details.collection,s.details.model,s.details.backdrop,s.details.symbol,s.details.number].join(' ').toLocaleLowerCase('ru-RU')
@@ -221,10 +224,12 @@ function App(){
     <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Настоящие карточки, учебные цены в GRAM':'Расчётные торговые возможности'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
    </>}
    {page==='Сканер'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> КАТАЛОГ ПОДАРКОВ</div><h1>Поиск подарков</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':'Актуальные предложения Portals по вашим фильтрам.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Фильтры</button></div>
-    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput);if(!isDemo)void run(()=>catalogFeed(searchInput))}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('');if(!isDemo)void run(()=>catalogFeed())}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={busy}>{busy?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
+    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM (TON 1:1).`:'Свежие листинги Portals: 60 подарков на странице.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
+    <div className="segmented scanner-tabs"><button className={scannerMode==='opportunities'?'chosen':''} onClick={()=>{setScannerMode('opportunities');setSearch('');setSearchInput('')}}>Выгодные</button><button className={scannerMode==='market'?'chosen':''} onClick={()=>{setScannerMode('market');setSearch('');setSearchInput('');if(!isDemo)void run(()=>catalogFeed('',1))}}>Весь рынок</button></div>
+    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput);if(!isDemo&&scannerMode==='market')void run(()=>catalogFeed(searchInput,1))}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('');if(!isDemo&&scannerMode==='market')void run(()=>catalogFeed('',1))}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={busy}>{busy?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
     <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Portals</option><option>Portals</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}
+    {!isDemo&&scannerMode==='market'&&<div className="pagination"><button className="ghost" disabled={busy||catalogPage===1} onClick={()=>void run(()=>catalogFeed(search,catalogPage-1))}><ArrowLeft size={16}/> Назад</button><strong>Страница {catalogPage}</strong><button className="ghost" disabled={busy||!catalogHasMore} onClick={()=>void run(()=>catalogFeed(search,catalogPage+1))}>Дальше <ArrowRight size={16}/></button></div>}
    </>}
    {page==='Портфель'&&<>
     <div className="intro"><div><h1>Портфель</h1><p>Учёт позиций и виртуальные сделки.</p></div><div className="segmented"><button className={virtual?'chosen':''} onClick={()=>setVirtual(true)}>Виртуальный</button><button className={!virtual?'chosen':''} onClick={()=>setVirtual(false)}>Личный</button></div></div>
@@ -249,7 +254,7 @@ function App(){
     </div>
     {me&&prefs&&<div className="panel list-panel"><div className="panel-head"><h2>Фильтры и уведомления</h2><button className="ghost" onClick={()=>setShowPrefs(!showPrefs)}><Settings2 size={16}/>{showPrefs?'Свернуть':'Настроить'}</button></div>
     {showPrefs&&<form className="settings-form" onSubmit={saveSettings}>
-      {([['capital','Мой бюджет, TON'],['roi','Минимальная доходность, %'],['max_cost','Максимальная цена, TON']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
+      {([['capital','Мой бюджет, GRAM (TON 1:1)'],['roi','Минимальная доходность, %'],['max_cost','Максимальная цена, GRAM']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
       {([['signals','Торговые уведомления'],['reminders','Напоминания о подписке'],['marketing','Согласие на рассылки']] as const).map(([key,label])=><label className="check" key={key}><input type="checkbox" name={key} defaultChecked={prefs[key]}/>{label}</label>)}
       <button type="button" className="ghost" onClick={()=>setAdvancedPrefs(!advancedPrefs)}>{advancedPrefs?'Скрыть дополнительные':'Дополнительные настройки'}</button>
       {advancedPrefs&&<>{([['min_profit','Минимальная прибыль, TON'],['liquidity','Минимум продаж'],['frequency_minutes','Интервал уведомлений, мин.']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
