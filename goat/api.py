@@ -149,15 +149,17 @@ def create_api(db, config, lifespan):
             return await signals(conn, Preferences.model_validate(access["prefs"]), history=past)
 
     @app.get("/api/catalog")
-    async def gifts_catalog(uid: User, q: str = ""):
+    async def gifts_catalog(uid: User, q: str = "", offset: int = 0, limit: int = 60):
+        offset = max(0, min(offset, 10_000))
+        limit = max(1, min(limit, 100))
         async with db.transaction() as conn:
             await require_access(conn, uid)
-            cached = await catalog(conn, q)
+            cached = await catalog(conn, q, offset, limit)
             portals_fees = await scalar(conn, "select fees from marketplace_fees where market='Portals'")
-        if q.strip() and config.portals_api_key:
+        if config.portals_api_key:
             try:
                 async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                    listings = await Portals(client, config.portals_api_key).search(q)
+                    listings = await Portals(client, config.portals_api_key).search(q, offset, limit)
                 return [{
                     "id": f"catalog:{item.market}:{item.external_id}", "strategy": "floor",
                     "state": "listed", "observed_at": datetime.now(UTC),
