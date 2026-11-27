@@ -182,7 +182,90 @@ class Portals:
 
 class MRKT:
     name = "MRKT"
-    status = "partner_contract_required"
+    endpoint = "https://api.tgmrkt.io/api/v1/gifts/saling"
+
+    def __init__(self, client: httpx.AsyncClient, token: str):
+        self.client = client
+        self.token = token
+        self.cache: dict[str, Listing] = {}
+
+    @staticmethod
+    def field(raw, *names, default=""):
+        for name in names:
+            value = raw.get(name)
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("title") or value.get("value")
+            if value not in (None, ""):
+                return value
+        return default
+
+    @classmethod
+    def gift(cls, raw):
+        collection = str(cls.field(raw, "collectionName", "collection", "name", default="MRKT Gift"))
+        number = int(cls.field(raw, "number", "giftNumber", "collectionNumber", default=0))
+        slug = re.sub(r"[^A-Za-z0-9]", "", collection) + f"-{number}"
+        gift_id = slug.casefold() if number > 0 and re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9]*-[0-9]+", slug
+        ) else "mrkt:" + str(cls.field(raw, "id", "giftId", default=sha256(
+            json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()))
+        rarity = cls.field(raw, "rarity", "rarityName", "rarityPercent", default=None)
+        image = cls.field(raw, "photoUrl", "imageUrl", "previewUrl", "image", "photo", default=None)
+        return Gift(
+            gift_id, collection, number, str(cls.field(raw, "title", "name", default=collection)),
+            str(cls.field(raw, "modelName", "model", default="—")),
+            str(cls.field(raw, "backdropName", "backgroundName", "backdrop", "background", default="—")),
+            str(cls.field(raw, "symbolName", "symbol", default="—")),
+            str(rarity) if rarity not in (None, "") else None, safe_image(image),
+        )
+
+    @classmethod
+    def listing(cls, raw):
+        external_id = str(cls.field(raw, "id", "giftId", "listingId"))
+        if not external_id:
+            raise ValueError("MRKT listing has no id")
+        amount = positive(Decimal(str(cls.field(raw, "salePrice", "price"))).scaleb(-9))
+        return Listing(cls.name, external_id, cls.gift(raw), amount, "TON",
+                       f"https://t.me/mrkt/app?startapp={external_id}", None)
+
+    async def page(self, cursor=""):
+        response = await self.client.post(self.endpoint, headers={
+            "Authorization": self.token,
+            "Referer": "https://cdn.tgmrkt.io/",
+            "User-Agent": "GOAT-NFT/1.0",
+        }, json={
+            "collectionNames": [], "modelNames": [], "backdropNames": [], "symbolNames": [],
+            "ordering": "Price", "lowToHigh": True, "maxPrice": None, "minPrice": None,
+            "mintable": None, "number": None, "count": 20, "cursor": cursor,
+            "query": None, "promotedFirst": False,
+        })
+        response.raise_for_status()
+        result = response.json(parse_float=Decimal)
+        if not isinstance(result, dict) or not isinstance(result.get("gifts"), list):
+            raise ValueError("Invalid MRKT response")
+        return result
+
+    async def listings(self):
+        output = []
+        cursor = ""
+        for _ in range(3):
+            result = await self.page(cursor)
+            page = [self.listing(raw) for raw in result["gifts"]]
+            output.extend(page)
+            cursor = str(result.get("cursor") or "")
+            if len(result["gifts"]) < 20 or not cursor:
+                break
+        self.cache = {item.external_id: item for item in output}
+        return output
+
+    async def sales(self):
+        # The public reverse-engineered contract documents active listings only.
+        return []
+
+    async def get_listing(self, external_id):
+        return self.cache.get(external_id)
+
+    async def offer(self, listing):
+        return None
 
 
 def candidates(listing, sales, listings, offer, fees, now):
