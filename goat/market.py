@@ -63,6 +63,56 @@ class Offer:
     price: Decimal
 
 
+PORTALS_DEFAULT_FEES = {
+    "buy_fee": "0", "sell_fee": ".025", "transfer": "0",
+    "network": "0", "conversion": "0", "extra_sell": "0",
+}
+
+
+def market_reference(listing, listings):
+    """Return a conservative active-ask reference without inventing sales."""
+    comparable = [item.price for item in listings
+                  if item.external_id != listing.external_id and item.market == listing.market
+                  and item.currency == listing.currency
+                  and item.gift.collection.casefold() == listing.gift.collection.casefold()
+                  and item.gift.model.casefold() == listing.gift.model.casefold()]
+    broad = [item.price for item in listings
+             if item.external_id != listing.external_id and item.market == listing.market
+             and item.currency == listing.currency
+             and item.gift.collection.casefold() == listing.gift.collection.casefold()]
+    peers = comparable if len(comparable) >= 3 else broad
+    references = []
+    if listing.floor and listing.floor > 0:
+        references.append((listing.floor, "floor Portals"))
+    if len(peers) >= 3:
+        prices = sorted(peers)
+        references.append((prices[(len(prices) - 1) // 4], "нижний квартиль активных лотов"))
+    if not references:
+        return listing.price, 0, "текущая цена"
+    price, basis = max(references, key=lambda item: item[0])
+    return price, len(peers), basis
+
+
+def listing_analysis(listing, listings, fees=None, target_roi=Decimal("5")):
+    target, liquidity, basis = market_reference(listing, listings)
+    settings = {**PORTALS_DEFAULT_FEES, **(fees or {})}
+    calc = calculate(Calculation(
+        buy=listing.price, sell=target, currency=listing.currency,
+        buy_fee=settings["buy_fee"], sell_fee=settings["sell_fee"],
+        transfer=settings["transfer"], network=settings["network"],
+        conversion=settings["conversion"], extra_sell=settings["extra_sell"],
+        target_roi=target_roi, conservative_sell=target * Decimal(".95"),
+    ))
+    return {
+        **asdict(listing.gift), **calc, "floor": listing.floor,
+        "purchase": listing.price, "sale": target, "market": listing.market,
+        "exit_market": listing.market, "url": listing.url, "liquidity": liquidity,
+        "transferable_at": listing.transferable_at, "history": [], "reference_basis": basis,
+        "risk": (f"Оценка выхода: {basis}. Учтены комиссии и запас 5%. "
+                 "Лот и рыночные цены могут измениться; прибыль не гарантирована."),
+    }
+
+
 class Marketplace(Protocol):
     name: str
 
@@ -304,8 +354,9 @@ def candidates(listing, sales, listings, offer, fees, now):
     # Portals WebApp exposes live asks and their current floor, but not completed
     # sales.  A below-floor listing is still a real, reproducible opportunity;
     # calculate it from the source price and floor rather than inventing sales.
-    if listing.floor and listing.floor > listing.price:
-        options.append(("floor", listing.market, listing.floor, "potential"))
+    reference, peer_liquidity, _ = market_reference(listing, listings)
+    if reference > listing.price:
+        options.append(("floor", listing.market, reference, "potential"))
     for market in {sale.market for sale in same}:
         prices = sorted(sale.price for sale in same if sale.market == market)
         if len(prices) < 3 or market not in fees:
@@ -324,12 +375,14 @@ def candidates(listing, sales, listings, offer, fees, now):
         calc = calculate(Calculation(
             buy=listing.price, sell=target, currency=listing.currency, buy_fee=buy["buy_fee"],
             sell_fee=sell["sell_fee"], transfer=buy["transfer"] if exit_market != listing.market else 0,
-            network=buy["network"], conversion=buy["conversion"], extra_sell=sell["extra_sell"]))
-        if calc["roi"] < 5:
+            network=buy["network"], conversion=buy["conversion"], extra_sell=sell["extra_sell"],
+            conservative_sell=target * Decimal(".95")))
+        if calc["roi"] < 5 or calc["conservative_profit"] <= 0:
             continue
         result.append((strategy, state, {
             **asdict(listing.gift), **calc, "floor": listing.floor, "purchase": listing.price, "sale": target,
-            "market": listing.market, "exit_market": exit_market, "url": listing.url, "liquidity": len(same),
+            "market": listing.market, "exit_market": exit_market, "url": listing.url,
+            "liquidity": max(len(same), peer_liquidity),
             "transferable_at": listing.transferable_at, "offer_id": offer.id if strategy == "instant" else None,
             "history": [{"price": sale.price, "date": sale.sold_at, "market": sale.market}
                         for sale in sorted(same, key=lambda s: s.sold_at)[-30:]],
@@ -388,11 +441,12 @@ async def scan(db, adapters, status):
                     """, m=listing.market, id=listing.external_id,p=listing.price)
                     await store_gift(conn, listing.gift)
                     await query(conn, """
-                      insert into market_listings(market,external_id,gift_id,price,currency,url,transferable_at,observed_at)
-                      values(:m,:e,:g,:p,:c,:u,:t,:o) on conflict(market,external_id) do update set
-                      price=excluded.price,active=true,observed_at=excluded.observed_at,transferable_at=excluded.transferable_at
+                      insert into market_listings(market,external_id,gift_id,price,currency,url,transferable_at,observed_at,floor)
+                      values(:m,:e,:g,:p,:c,:u,:t,:o,:f) on conflict(market,external_id) do update set
+                      price=excluded.price,floor=excluded.floor,active=true,observed_at=excluded.observed_at,
+                      transferable_at=excluded.transferable_at,url=excluded.url
                     """, m=listing.market,e=listing.external_id,g=listing.gift.id,p=listing.price,c=listing.currency,
-                                u=listing.url,t=listing.transferable_at,o=now)
+                                u=listing.url,t=listing.transferable_at,o=now,f=listing.floor)
         async with db.transaction() as conn:
             persisted = await rows(conn, """
               select g.*,s.market,s.external_id,s.price,s.currency,s.sold_at from market_sales s
