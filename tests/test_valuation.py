@@ -27,7 +27,7 @@ def test_lucky_locket_collection_floor_is_not_a_valuation():
 
 def test_sales_scenarios_and_outlier_do_not_use_collection_floor():
     item, now = listing(), datetime.now(UTC)
-    sales = [Sale('Portals',str(i),replace(item.gift,id=f'other-{i}',number=151+i),
+    sales = [Sale('Portals',str(i),replace(item.gift,id=f'other-{i}',number=164+i),
                   Decimal(price),'GRAM',now) for i,price in enumerate(['150','151','152','153','9999'])]
     d = listing_analysis(item,[],FEES,sales=sales)
     assert d['fair_value'] == 151
@@ -131,4 +131,29 @@ async def test_portals_resolves_missing_collection_and_loads_model_peers():
         assert 'filter_by_backdrops' not in calls[1][1]
         await adapter.comparables(listing())
         assert len([call for call in calls if call[0]=='/collections'])==1
+
+
+def test_special_serial_gets_model_baseline_without_number_premium():
+    item=replace(listing('5'),gift=replace(listing().gift,number=11))
+    peers=[replace(item,external_id=str(i),price=Decimal(price),
+            gift=replace(item.gift,id=f'ordinary-{i}',number=164+i))
+            for i,price in enumerate(('8','9','10','11'))]
+    d=listing_analysis(item,peers,FEES)
+    assert d['comparison_match']=='model_without_number_premium'
+    assert d['conservative_sale']==8 and d['confidence']=='low'
+    assert d['conservative_profit']>0
+
+
+async def test_portals_batch_verification_splits_requests_without_per_lot_calls():
+    import httpx
+    async with httpx.AsyncClient() as client:
+        adapter=Portals(client,'tma test')
+        calls=[]
+        async def get(path,**params):
+            calls.append(params)
+            return {'results':[]}
+        adapter.get=get
+        assert await adapter.get_listings([str(i) for i in range(205)])=={}
+        assert [len(c['ids'].split(',')) for c in calls]==[100,100,5]
+        assert all(c['status']=='listed' for c in calls)
 

@@ -34,7 +34,7 @@ const metricLabels: Record<string,string> = {
  transfer:'Перевод', buy_commission:'Комиссия покупки', sell_commission:'Комиссия продажи', fx_impact:'Влияние курса',
 }
 async function api<T>(path:string, options:RequestInit={}):Promise<T> {
- const res=await fetch('/api'+path,{...options,headers:{...options.headers,...(auth?{Authorization:'tma '+auth}:{}),...(options.body?{'Content-Type':'application/json'}:{})}})
+ const res=await fetch('/api'+path,{...options,signal:AbortSignal.timeout(25000),headers:{...options.headers,...(auth?{Authorization:'tma '+auth}:{}),...(options.body?{'Content-Type':'application/json'}:{})}})
  if(!res.ok){const data=await res.json().catch(()=>({}));throw new Error(typeof data.detail==='string'?data.detail:'Проверьте введённые данные')}
  return res.status===204?undefined as T:res.json()
 }
@@ -87,7 +87,7 @@ function App(){
  const [page,setPage]=useState('Главная')
  const [samples,setSamples]=useState<Signal[]>([])
  const [live,setLive]=useState<Signal[]>([])
- const [watch,setWatch]=useState<Signal[]>([])
+ 
  const [catalogItems,setCatalogItems]=useState<Signal[]>([])
  const [markets,setMarkets]=useState<Market[]>([])
  const [me,setMe]=useState<Profile>()
@@ -122,11 +122,32 @@ function App(){
  const [catalogSession,setCatalogSession]=useState('')
  const [diagnostics,setDiagnostics]=useState<Record<string,unknown>>()
  const [busy,setBusy]=useState(false)
+ const [searching,setSearching]=useState(false)
+ const [numberFilter,setNumberFilter]=useState('all')
+ const searchVersion=useRef(0)
+ const activeSearch=useRef({q:'',strategy:'all',market:'all',number:'all',sort:'latest'})
  const [pendingVerify,setPendingVerify]=useState<string>()
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
  const loadItems=async()=>{const [positions,history]=await Promise.all([api<Item[]>('/portfolio'),api<RecordData[]>('/portfolio/history')]);setItems(positions);setTransactions(history)}
- const liveFeed=async()=>{const [signals,nearby]=await Promise.all([api<Signal[]>('/signals'),api<Signal[]>('/nearby')]);setLive(signals);setWatch(nearby)}
- const catalogFeed=async(q='',page=1)=>{const params=new URLSearchParams({offset:String((page-1)*20),limit:'20'});if(q)params.set('q',q);if(page>1&&catalogSession)params.set('session',catalogSession);const data=await api<{items:Signal[];has_more:boolean;total:number;session:string}>('/catalog?'+params);setCatalogItems(data.items);setCatalogPage(page);setCatalogHasMore(data.has_more);setCatalogTotal(data.total);setCatalogSession(data.session)}
+ const liveFeed=async()=>{const current=activeSearch.current;const params=new URLSearchParams(current);const signals=await api<Signal[]>('/signals?'+params);if(current===activeSearch.current)setLive(signals)}
+ const catalogFeed=async(q='',page=1,reset=false)=>{
+  const current=activeSearch.current
+  const params=new URLSearchParams({...current,q,offset:String((page-1)*20),limit:'20'})
+  if(!reset&&catalogSession)params.set('session',catalogSession)
+  const data=await api<{items:Signal[];has_more:boolean;total:number;session:string}>('/catalog?'+params)
+  if(current!==activeSearch.current)return
+  setCatalogItems(data.items);setCatalogPage(page);setCatalogHasMore(data.has_more);setCatalogTotal(data.total);setCatalogSession(data.session)
+ }
+ async function searchGifts(mode=scannerMode,q=searchInput){
+  const version=++searchVersion.current
+  activeSearch.current={q,strategy:filter,market,number:numberFilter,sort}
+  setSearch(q);setSearching(true)
+  try {
+   if(mode==='market')await catalogFeed(q,1,true)
+   else await liveFeed()
+   if(version===searchVersion.current)setToast('Поиск обновлён по заданным фильтрам')
+  }catch(e){announce(e)}finally{if(version===searchVersion.current)setSearching(false)}
+ }
  const announce=(e:unknown)=>setToast(e instanceof Error?e.message:String(e))
  const change=(name:string)=>{tg?.HapticFeedback?.selectionChanged();setPage(name);setFilter('all');setMarket('all');window.scrollTo(0,0)}
  const run=async(task:()=>Promise<void>)=>{if(busy)return;setBusy(true);try{await task()}catch(e){announce(e)}finally{setBusy(false)}}
@@ -141,7 +162,7 @@ function App(){
  useEffect(()=>{if(!toast)return;const id=window.setTimeout(()=>setToast(''),4800);return()=>clearTimeout(id)},[toast])
  useEffect(()=>{
   if(!me?.active)return
-  const id=window.setInterval(()=>{void liveFeed().catch(()=>setLive([]));void api<Market[]>('/market-status').then(setMarkets).catch(()=>{})},30000)
+  const id=window.setInterval(()=>{void liveFeed().catch(announce);void api<Market[]>('/market-status').then(setMarkets).catch(()=>{})},30000)
   return()=>clearInterval(id)
  },[me?.active])
  useEffect(()=>{
@@ -149,7 +170,7 @@ function App(){
   const id=window.setInterval(()=>{void api<{status:string;checked_at?:string}>('/signals/'+pendingVerify+'/verification').then(result=>{
    if(result.status==='queued')return
    setPendingVerify(undefined);setToast(({available:'Цена и наличие подтверждены.',stale:'Цена изменилась.',unavailable:'Предложение недоступно.',source_unavailable:'Источник недоступен.'} as Record<string,string>)[result.status]??result.status)
-   void liveFeed().catch(()=>setLive([]))
+   void liveFeed().catch(announce)
   }).catch(e=>{setPendingVerify(undefined);announce(e)})},2500)
   return()=>clearInterval(id)
  },[pendingVerify])
@@ -161,12 +182,7 @@ function App(){
  const isDemo=!me?.active
  const source=isDemo?samples:live
  const searchable=isDemo?samples:(scannerMode==='opportunities'?live:catalogItems)
- const display=useMemo(()=>searchable.filter(s=>{
-    const q=search.trim().toLocaleLowerCase('ru-RU')
-    const haystack=[s.details.title,s.details.collection,s.details.model,s.details.backdrop,s.details.symbol,s.details.number].join(' ').toLocaleLowerCase('ru-RU')
-    return (!q||haystack.includes(q))&&(filter==='all'||s.strategy===filter)&&(market==='all'||s.details.market===market)
-   })
-    .sort((a,b)=>sort==='roi'?Number(b.details.roi)-Number(a.details.roi):sort==='cost'?Number(a.details.cost)-Number(b.details.cost):0),[searchable,filter,market,sort,search])
+ const display=searchable
  const chart=useMemo(()=>(source[0]?.details.history??[]).slice(-range),[source,range])
  const portfolio=items.filter(i=>i.virtual===virtual)
  const moneyTotals=useMemo(()=>Object.fromEntries(['TON','GRAM'].map(currency=>{
@@ -189,7 +205,7 @@ function App(){
   for(const key of ['quiet_start','quiet_end'] as const)if(form.has(key))next[key]=form.get(key)===''?null:Number(form.get(key))
   for(const key of ['collections','markets','strategies'] as const)if(form.has(key))next[key]=String(form.get(key)).split(',').map(x=>x.trim()).filter(Boolean)
   for(const key of ['signals','marketing','reminders','limit_per_gift'] as const)next[key]=form.get(key)==='on'
-  void run(async()=>{const saved=await api<Prefs>('/me/preferences',{method:'PUT',body:JSON.stringify(next)});setPrefs(saved);setMe(prev=>prev?{...prev,prefs:saved}:prev);if(me?.active)await liveFeed();setToast('Настройки сохранены');setShowPrefs(false)})
+  void run(async()=>{const saved=await api<Prefs>('/me/preferences',{method:'PUT',body:JSON.stringify(next)});setPrefs(saved);setMe(prev=>prev?{...prev,prefs:saved}:prev);if(me?.active){await liveFeed();setCatalogItems([]);setCatalogSession('')};setToast('Настройки сохранены');setShowPrefs(false)})
  }
  async function exportStats(){
   const response=await fetch('/api/admin/statistics?format=csv&days='+period,{headers:{Authorization:'tma '+auth}})
@@ -211,7 +227,7 @@ function App(){
  function signalGrid(entries:Signal[]){
   return loading?<div className="signal-grid">{[1,2,3].map(i=><div className="skeleton" key={i}/>)}</div>:
    entries.length?<div className="signal-grid">{entries.map(signal=><SignalCard key={signal.id} signal={signal} onClick={()=>openGift(signal)}/>)}</div>:
-    <div className="empty"><ScanLine size={25}/><strong>Подходящих сигналов пока нет</strong><span>Проверьте фильтры и состояние площадок.</span></div>
+    <div className="empty"><ScanLine size={25}/><strong>Подходящих сигналов пока нет</strong><span>Совпадений с заданными фильтрами сейчас нет. Нажмите «Найти» для обновления.</span></div>
  }
  return <MotionConfig reducedMotion="user"><div className="app-root">
   {showSplash&&<div className={`splash ${loading?'':'splash-ready'}`} aria-label="GOAT NFT загружается">
@@ -246,12 +262,13 @@ function App(){
     <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Настоящие карточки, учебные цены в GRAM':'Расчётные торговые возможности'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
    </>}
    {page==='Сканер'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Проанализированная часть рынка Portals. Фоновый обход продолжается.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
-    <div className="segmented scanner-tabs"><button className={scannerMode==='opportunities'?'chosen':''} onClick={()=>{setScannerMode('opportunities');setSearch('');setSearchInput('')}}>Выгодные</button><button className={scannerMode==='market'?'chosen':''} onClick={()=>{setScannerMode('market');setSearch('');setSearchInput('');if(!isDemo)void run(()=>catalogFeed('',1))}}>Весь рынок</button></div>
-    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput);if(!isDemo&&scannerMode==='market')void run(()=>catalogFeed(searchInput,1))}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('');if(!isDemo&&scannerMode==='market')void run(()=>catalogFeed('',1))}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={busy}>{busy?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
-    <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Portals</option><option>Portals</option></select></Field>
+    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Лоты Portals по вашему бюджету и сохранённым фильтрам. Обход рынка продолжается.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
+    <div className="segmented scanner-tabs"><button className={scannerMode==='opportunities'?'chosen':''} onClick={()=>{setScannerMode('opportunities');if(!isDemo)void searchGifts('opportunities')}}>Выгодные</button><button className={scannerMode==='market'?'chosen':''} onClick={()=>{setScannerMode('market');if(!isDemo)void searchGifts('market')}}>Весь рынок</button></div>
+    <div className="panel filters"><Field label="Поиск подарка · фильтры применяются кнопкой «Найти»"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();if(!isDemo)void searchGifts()}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');if(!isDemo)void searchGifts(scannerMode,'')}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={searching}>{searching?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
+    <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Все доступные</option><option>Portals</option></select></Field>
+    <Field label="Номер подарка"><select value={numberFilter} onChange={e=>setNumberFilter(e.target.value)}><option value="all">Любой</option><option value="rare">Редкие номера</option><option value="low">№ 1–100</option><option value="repeat">Одинаковые цифры</option><option value="palindrome">Зеркальные</option><option value="round">Круглые сотни</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}
-    {!isDemo&&scannerMode==='opportunities'&&!display.length&&watch.length>0&&<section><h2>Для наблюдения</h2><p>Укладываются в бюджет, но не подтверждены как прибыльные сделки. Проверьте достоверность оценки и комиссии.</p>{signalGrid(watch)}</section>}
+
     {!isDemo&&scannerMode==='market'&&<div className="pagination"><button className="ghost" disabled={busy||catalogPage===1} onClick={()=>void run(()=>catalogFeed(search,catalogPage-1))}><ArrowLeft size={16}/> Назад</button><strong>{catalogPage} / {Math.max(1,Math.ceil(catalogTotal/20))} · {catalogTotal} лотов</strong><button className="ghost" disabled={busy||!catalogHasMore} onClick={()=>void run(()=>catalogFeed(search,catalogPage+1))}>Дальше <ArrowRight size={16}/></button></div>}
    </>}
    {page==='Портфель'&&<>

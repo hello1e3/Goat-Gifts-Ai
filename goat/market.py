@@ -14,6 +14,7 @@ import httpx
 from goat.db import one, query, rows
 from goat.finance import Calculation, calculate
 from goat.valuation import FairValueEngine
+from goat.search import number_kind
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class Gift:
     @property
     def comparable(self):
         number = str(self.number)
-        tier = number if self.number <= 100 or len(set(number)) == 1 or self.number % 100 == 0 else "regular"
+        tier = number if number_kind(self.number) != "regular" else "regular"
         return (self.collection.casefold(), self.model.casefold(), self.backdrop.casefold(),
                 self.symbol.casefold(), self.rarity, tier)
 
@@ -142,6 +143,7 @@ class Portals:
         self.webapp = token.startswith("tma ")
         self.next_call = 0.0
         self.lock = asyncio.Lock()
+        self.rare_offset = 0
         self.scan_offset = 0
         self.scan_complete = False
         self.api_errors = 0
@@ -225,7 +227,29 @@ class Portals:
                     self.scan_offset = 0
                 else:
                     self.scan_offset += len(page)
+        try:
+            result = await self.get('/nfts/search', status='listed', limit=100,
+                offset=self.rare_offset, sort_by='external_collection_number asc')
+            page = result.get('results', [])
+            self.rare_offset = self.rare_offset + len(page) if page else 0
+            for raw in page:
+                if raw.get('status') == 'listed':
+                    item = self.listing(raw)
+                    output[item.external_id] = item
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            pass
         return list(output.values())
+
+    async def get_listings(self, ids):
+        found = {}
+        for offset in range(0,len(ids),100):
+            result = await self.get('/nfts/search', ids=','.join(ids[offset:offset+100]),
+                                    status='listed',limit=100,offset=0)
+            for raw in result.get('results',[]):
+                if raw.get('status') == 'listed':
+                    item = self.listing(raw)
+                    found[item.external_id] = item
+        return found
 
     async def comparables(self, listing):
         collection_id = self.collection_ids.get(listing.gift.collection.casefold())
@@ -447,6 +471,7 @@ async def scan(db, adapters, status):
                         cursor = await one(conn, "select value from system_settings where key='portals_cursor'")
                     if cursor:
                         adapter.scan_offset = int(cursor['value']['offset'])
+                        adapter.rare_offset = int(cursor['value'].get('rare_offset',0))
                 listed = await adapter.listings()
             except (httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError):
                 async with db.transaction() as conn:
@@ -476,25 +501,31 @@ async def scan(db, adapters, status):
                 if isinstance(adapter, Portals):
                     await query(conn, """insert into system_settings(key,value) values('portals_cursor',cast(:v as jsonb))
                         on conflict(key) do update set value=excluded.value""",
-                        v=json.dumps({'offset':adapter.scan_offset}))
+                        v=json.dumps({'offset':adapter.scan_offset,'rare_offset':adapter.rare_offset}))
                 for sale in sold:
                     await store_gift(conn, sale.gift)
                     await query(conn, """insert into market_sales values(:m,:e,:g,:p,:c,:s)
                       on conflict do nothing""", m=sale.market, e=sale.external_id, g=sale.gift.id,
                                 p=sale.price, c=sale.currency, s=sale.sold_at)
-                for listing in listed:
-                    await query(conn, """
-                        update trading_signals set state='stale' where listing_market=:m and listing_id=:id
-                        and (details->>'purchase')::numeric<>:p
-                    """, m=listing.market, id=listing.external_id,p=listing.price)
-                    await store_gift(conn, listing.gift)
-                    await query(conn, """
-                      insert into market_listings(market,external_id,gift_id,price,currency,url,transferable_at,observed_at,floor)
-                      values(:m,:e,:g,:p,:c,:u,:t,:o,:f) on conflict(market,external_id) do update set
-                      price=excluded.price,floor=excluded.floor,active=true,observed_at=excluded.observed_at,
-                      transferable_at=excluded.transferable_at,url=excluded.url
-                    """, m=listing.market,e=listing.external_id,g=listing.gift.id,p=listing.price,c=listing.currency,
-                                u=listing.url,t=listing.transferable_at,o=now,f=listing.floor)
+                payload = [dict(m=item.market,e=item.external_id,g=item.gift.id,p=str(item.price),
+                    c=item.currency,u=item.url,t=item.transferable_at,o=datetime.now(UTC),
+                    f=str(item.floor) if item.floor is not None else None) for item in listed]
+                await query(conn,"""insert into gifts(id,collection,number,title,model,backdrop,symbol,rarity,image)
+                    select id,collection,number,title,model,backdrop,symbol,rarity,image
+                    from jsonb_to_recordset(cast(:data as jsonb)) as x(id text,collection text,number bigint,
+                    title text,model text,backdrop text,symbol text,rarity text,image text)
+                    on conflict(id) do update set image=excluded.image""",
+                    data=json.dumps(list({i.gift.id:asdict(i.gift) for i in listed}.values()),default=str))
+                await query(conn,"""update trading_signals t set state='stale'
+                    from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,e text,p numeric)
+                    where t.listing_market=x.m and t.listing_id=x.e and (t.details->>'purchase')::numeric<>x.p""",
+                    data=json.dumps(payload,default=str))
+                await query(conn,"""insert into market_listings(market,external_id,gift_id,price,currency,url,transferable_at,observed_at,floor)
+                    select m,e,g,p,c,u,t,o,f from jsonb_to_recordset(cast(:data as jsonb))
+                    as x(m text,e text,g text,p numeric,c text,u text,t timestamptz,o timestamptz,f numeric)
+                    on conflict(market,external_id) do update set price=excluded.price,floor=excluded.floor,
+                    active=true,observed_at=excluded.observed_at,transferable_at=excluded.transferable_at,url=excluded.url""",
+                    data=json.dumps(payload,default=str))
         async with db.transaction() as conn:
             persisted = await rows(conn, """
               select g.*,s.market,s.external_id,s.price,s.currency,s.sold_at from market_sales s
@@ -517,50 +548,65 @@ async def scan(db, adapters, status):
         diagnostics = {'analyzed': len(current), 'profitable': 0, 'insufficient': 0,
                        'asks_only': 0, 'fees_missing': 0, 'non_positive': 0,
                        'collections_in_batch': len({item.gift.collection for item in current})}
+        analyses, pending, offers = [], [], []
         for listing in current:
             details = listing_analysis(listing, peers, fees.get(listing.market), engine=engine)
             diagnostics['insufficient'] += int(details['evidence'] == 'none')
             diagnostics['asks_only'] += int(details['evidence'] == 'asks')
             diagnostics['fees_missing'] += int(not details['fees_configured'])
             diagnostics['non_positive'] += int(details['profit'] is not None and details['profit'] <= 0)
-            async with db.transaction() as conn:
-                await query(conn, """insert into market_analysis(market,external_id,details)
-                    values(:m,:e,cast(:d as jsonb)) on conflict(market,external_id) do update
-                    set details=excluded.details,observed_at=now()""",
-                    m=listing.market,e=listing.external_id,d=json.dumps(details,default=str))
-                await query(conn, """update trading_signals set state='stale'
-                    where listing_market=:m and listing_id=:e""",m=listing.market,e=listing.external_id)
+            analyses.append(dict(m=listing.market,e=listing.external_id,d=details))
             if listing.market not in fees:
                 continue
             adapter = by_name[listing.market]
             try:
                 offer = await adapter.offer(listing)
                 if offer:
-                    async with db.transaction() as conn:
-                        await query(conn, """
-                            insert into market_offers values(:m,:id,cast(:d as jsonb),now())
-                            on conflict(market,external_id) do update set details=excluded.details,observed_at=now()
-                        """, m=listing.market,id=offer.id,d=json.dumps(asdict(offer),default=str))
-                options = candidates(listing, sales_data, peers, offer, fees, now, engine=engine)
-                if not options:
-                    continue
-                found = await adapter.get_listing(listing.external_id)
-            except (httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError):
+                    offers.append(dict(m=listing.market,id=offer.id,d=asdict(offer)))
+                options = candidates(listing,sales_data,peers,offer,fees,now,engine=engine)
+                if options:
+                    pending.append((listing,options))
+            except (httpx.HTTPError,ValueError,KeyError,TypeError,ArithmeticError):
                 continue
-            async with db.transaction() as conn:
-                if found is None or found.price != listing.price or found.gift != listing.gift:
-                    await query(conn, """
-                       update trading_signals set state=:state where listing_market=:m and listing_id=:id
-                    """, state="unavailable" if found is None else "stale", m=listing.market, id=listing.external_id)
+        verified, changes = [], []
+        for adapter in adapters:
+            group = [(item,options) for item,options in pending if item.market==adapter.name]
+            try:
+                if isinstance(adapter,Portals):
+                    found_map = await adapter.get_listings([item.external_id for item,_ in group])
+                else:
+                    found_map = {item.external_id:await adapter.get_listing(item.external_id) for item,_ in group}
+            except (httpx.HTTPError,ValueError,KeyError,TypeError,ArithmeticError):
+                continue
+            for listing,options in group:
+                found = found_map.get(listing.external_id)
+                if found is None or found.price!=listing.price or found.gift!=listing.gift:
+                    changes.append(dict(m=listing.market,e=listing.external_id,s='unavailable' if found is None else 'stale'))
                     continue
-                for strategy, state, details in options:
-                    diagnostics['profitable'] += 1
-                    identity = sha256(f"{listing.market}/{listing.external_id}/{strategy}/{details['exit_market']}".encode()).hexdigest()
-                    await query(conn, """
-                        insert into trading_signals values(:id,:m,:listing,:strategy,cast(:d as jsonb),:state,now())
-                        on conflict(id) do update set details=excluded.details,state=excluded.state,observed_at=now()
-                    """, id=identity, m=listing.market, listing=listing.external_id, strategy=strategy,
-                                d=json.dumps(details, default=str, ensure_ascii=False), state=state)
+                for strategy,state,details in options:
+                    identity=sha256(f"{listing.market}/{listing.external_id}/{strategy}/{details['exit_market']}".encode()).hexdigest()
+                    verified.append(dict(id=identity,m=listing.market,e=listing.external_id,strategy=strategy,d=details,state=state))
+        diagnostics['profitable']=len(verified)
+        async with db.transaction() as conn:
+            await query(conn,"""insert into market_analysis(market,external_id,details)
+                select m,e,d from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,e text,d jsonb)
+                on conflict(market,external_id) do update set details=excluded.details,observed_at=now()""",
+                data=json.dumps(analyses,default=str))
+            await query(conn,"""update trading_signals t set state='stale'
+                from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,e text)
+                where t.listing_market=x.m and t.listing_id=x.e""",data=json.dumps(analyses,default=str))
+            await query(conn,"""update trading_signals t set state=x.s
+                from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,e text,s text)
+                where t.listing_market=x.m and t.listing_id=x.e""",data=json.dumps(changes))
+            await query(conn,"""insert into market_offers
+                select m,id,d,now() from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,id text,d jsonb)
+                on conflict(market,external_id) do update set details=excluded.details,observed_at=now()""",
+                data=json.dumps(list({(o['m'],o['id']):o for o in offers}.values()),default=str))
+            await query(conn,"""insert into trading_signals
+                select id,m,e,strategy,d,state,now() from jsonb_to_recordset(cast(:data as jsonb))
+                as x(id text,m text,e text,strategy text,d jsonb,state text)
+                on conflict(id) do update set details=excluded.details,state=excluded.state,observed_at=now()""",
+                data=json.dumps(verified,default=str))
         async with db.transaction() as conn:
             diagnostics['updated_at'] = datetime.now(UTC).isoformat()
             diagnostics['duration_seconds'] = (datetime.now(UTC) - now).total_seconds()

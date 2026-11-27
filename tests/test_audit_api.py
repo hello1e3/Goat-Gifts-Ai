@@ -14,7 +14,7 @@ from goat.config import Config
 from goat.db import query
 from goat.market import Gift, Listing, listing_analysis, store_gift
 from goat.finance import Calculation, calculate
-from goat.terminal import Preferences, signals
+from goat.terminal import Preferences, signals, save_prefs
 from test_core import TOKEN, init_data
 
 
@@ -42,6 +42,7 @@ async def test_catalog_sessions_recheck_and_portfolio_isolation(db):
         for uid in (1,2):
             await register(conn,uid,None,'Test')
             await grant(conn,uid,86400,'trial')
+            await save_prefs(conn,uid,Preferences(roi=0))
         items=[await seed(conn) for _ in range(43)]
     app=create_api(db,Config(bot_token=TOKEN,admin_ids='1'),lifespan)
     class Adapter:
@@ -153,4 +154,28 @@ async def test_opening_gift_enriches_model_and_updates_profitable_tab(db):
             async with db.transaction() as conn:
                 feed=await signals(conn,Preferences(capital=20))
                 assert len(feed)==1 and feed[0]['listing_id']==target.external_id
+
+
+async def test_catalog_honors_budget_roi_collection_and_number_on_server(db):
+    async with db.transaction() as conn:
+        await register(conn,1,None,'Test')
+        await grant(conn,1,86400,'trial')
+        await save_prefs(conn,1,Preferences(capital=20,roi=5,min_profit='.5',collections=['Test']))
+        good=await seed(conn,'10')
+        expensive=await seed(conn,'30')
+        unknown=await seed(conn,'5')
+        for item in (good,expensive):
+            details=listing_analysis(item,[],dict(buy_fee='0',sell_fee='.02',transfer='0',network='0',conversion='0',extra_sell='0'))
+            details.update(roi='10',profit='1',liquidity=0)
+            await query(conn,"update market_analysis set details=cast(:d as jsonb) where external_id=:id",d=json.dumps(details,default=str),id=item.external_id)
+    app=create_api(db,Config(bot_token=TOKEN,admin_ids='1'),lifespan)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+        headers={'Authorization':'tma '+init_data(1)}
+        result=(await client.get('/api/catalog',headers=headers)).json()
+        assert result['total']==1 and result['items'][0]['details']['purchase']=='10'
+        assert (await client.get('/api/catalog?q=%23154',headers=headers)).json()['total']==1
+        assert (await client.get('/api/catalog?number=rare',headers=headers)).json()['total']==0
+        assert (await client.get('/api/catalog?strategy=instant',headers=headers)).json()['total']==0
+        assert (await client.get('/api/catalog?market=MRKT',headers=headers)).json()['total']==0
+        assert (await client.get('/api/catalog',params={'session':result['session'],'number':'rare'},headers=headers)).status_code==409
 

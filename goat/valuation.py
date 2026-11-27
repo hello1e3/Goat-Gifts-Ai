@@ -89,6 +89,17 @@ class FairValueEngine:
                 offered = pooled
                 lowest_ask = min(a.price for a in similar.values())
                 match = 'model'
+        # A special serial can use the ordinary model floor as a baseline only.
+        # Never import a premium from a different special serial number.
+        if len(offered) < 3 and listing.gift.comparable[-1] != 'regular':
+            model_key = (*self.model_key(listing)[:-1], 'regular')
+            ordinary = {a.external_id:a for a in self.models[model_key]
+                        if a.external_id != listing.external_id and a.gift.id != listing.gift.id}
+            pooled = clean([(a.price,Decimal(1)) for a in ordinary.values()])
+            if len(pooled) >= 3:
+                offered = pooled
+                lowest_ask = min(a.price for a in ordinary.values())
+                match = 'model_without_number_premium'
         result = dict(fair_value=None, conservative_sale=None, optimistic_sale=None,
                       confidence='insufficient', reference_basis='Недостаточно сопоставимых данных',
                       sales_count=len(sold), comparable_asks=len(offered),
@@ -101,7 +112,8 @@ class FairValueEngine:
         elif len(offered) >= 3:
             result.update(fair_value=weighted(offered, '.25'), conservative_sale=lowest_ask,
                           optimistic_sale=weighted(offered, '.75'), evidence='asks', confidence='low',
-                          reference_basis=('Объявления с той же моделью; премия фона и символа не оценена'
+                          reference_basis=('Обычные номера той же модели; премия редкого номера, фона и символа не оценена'
+                              if match=='model_without_number_premium' else 'Объявления с той же моделью; премия фона и символа не оценена'
                               if match=='model' else 'Объявления с той же моделью и фоном; премия символа не оценена'
                               if match=='model_backdrop' else 'Объявления с совпадающими характеристиками')
                               + '; предварительный расчёт, цена продажи не подтверждена')

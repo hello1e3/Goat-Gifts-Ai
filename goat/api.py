@@ -18,6 +18,7 @@ from goat.accounts import erase, profile, register, validate_init_data
 from goat.billing import history, statistics
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, calculate
+from goat.search import filtered
 from goat.gift_preview import GiftPreviews
 from goat.market import PORTALS_DEFAULT_FEES, Portals, listing_analysis, candidates
 from goat.terminal import CloseInput, PortfolioInput, Preferences, add_item, catalog, close_item, demo, portfolios, save_prefs, signals
@@ -144,42 +145,50 @@ def create_api(db, config, lifespan):
         return JSONResponse(json.loads(json.dumps(calculate(data), default=str)))
 
     @app.get("/api/signals")
-    async def feed(uid: User, past: bool = False):
+    async def feed(uid: User, past: bool = False, q: str = "", strategy: str = "all",
+                   market: str = "all", number: str = "all", sort: str = "latest"):
         async with db.transaction() as conn:
             access = await require_access(conn, uid)
-            return await signals(conn, Preferences.model_validate(access["prefs"]), history=past)
+            preferences = Preferences.model_validate(access['prefs'])
+            items = await signals(conn, preferences, history=past)
+            return items if past else filtered(items,preferences,q,strategy,market,number,sort)
 
     @app.get("/api/catalog")
-    async def gifts_catalog(uid: User, q: str = "", offset: int = 0, limit: int = 60, session: str = ''):
+    async def gifts_catalog(uid: User, q: str = "", offset: int = 0, limit: int = 60, session: str = '',
+                            strategy: str = 'all', market: str = 'all', number: str = 'all', sort: str = 'latest'):
         from uuid import UUID, uuid4
         offset, limit = max(0, offset), max(1, min(limit, 100))
         q = q.strip()[:80]
         async with db.transaction() as conn:
-            await require_access(conn, uid)
+            access = await require_access(conn, uid)
+            preferences = Preferences.model_validate(access['prefs'])
+            signature = json.dumps([q,strategy,market,number,sort,preferences.model_dump(mode='json')],sort_keys=True)
             await query(conn,"delete from catalog_sessions where expires_at<now()")
-            saved = await one(conn,"select * from catalog_sessions where id=:s and user_id=:u and search=:q",
-                              s=UUID(session),u=uid,q=q) if session else None
+            try:
+                saved = await one(conn,"select * from catalog_sessions where id=:s and user_id=:u and search=:q",
+                                  s=UUID(session),u=uid,q=signature) if session else None
+            except ValueError:
+                raise HTTPException(422,'Некорректная страница поиска')
             if session and not saved:
-                raise HTTPException(409,'Поиск устарел. Нажмите «Найти», чтобы обновить результаты.')
+                raise HTTPException(409,'Фильтры изменились или поиск устарел. Нажмите «Найти».')
+            cached = await rows(conn,"""select 'catalog:'||l.market||':'||l.external_id as id,
+                'floor' as strategy,'listed' as state,l.observed_at,a.details,l.external_id
+                from market_listings l join market_analysis a using(market,external_id)
+                where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'""")
+            matching = filtered(cached,preferences,q,strategy,market,number,sort,thresholds=True)
             if not saved:
-                ids = [row['external_id'] for row in await rows(conn,"""select l.external_id
-                    from market_listings l join gifts g on g.id=l.gift_id
-                    join market_analysis a using(market,external_id)
-                    where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
-                    and (:q='' or concat_ws(' ',g.title,g.collection,g.model,g.backdrop,g.symbol,g.number)
-                    ilike '%'||:q||'%') order by l.external_id""",q=q)]
+                ids = [row['external_id'] for row in matching]
                 session = str(uuid4())
                 await query(conn,"""insert into catalog_sessions values(:s,:u,:q,cast(:ids as jsonb),now()+interval '10 minutes')""",
-                            s=UUID(session),u=uid,q=q,ids=json.dumps(ids))
+                            s=UUID(session),u=uid,q=signature,ids=json.dumps(ids))
             else:
                 ids = saved['ids']
-            cached = await rows(conn,"""select 'catalog:'||l.market||':'||l.external_id as id,
-                'floor' as strategy,case when l.active then 'listed' else 'unavailable' end as state,
-                l.observed_at,a.details from market_listings l join market_analysis a using(market,external_id)
-                where l.market='Portals' and l.external_id=any(cast(:ids as text[])) order by l.external_id""",
-                ids=ids[offset:offset+limit])
+            by_id = {row['external_id']:row for row in matching}
+            # Remove unavailable/changed lots but never let a page bypass current filters.
+            ids = [id_ for id_ in ids if id_ in by_id]
+            result = [by_id[id_] for id_ in ids[offset:offset+limit]]
             diagnostic = await scalar(conn, "select value from system_settings where key='market_diagnostics'")
-        return {'items': cached, 'has_more': offset+limit < len(ids), 'total':len(ids),'session':session,
+        return {'items': result, 'has_more': offset+limit < len(ids), 'total':len(ids),'session':session,
                 'offset': offset, 'coverage': diagnostic, 'source': 'background_cache'}
 
     @app.get('/api/nearby')
