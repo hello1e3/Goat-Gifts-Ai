@@ -127,8 +127,10 @@ class Portals:
 
     def listing(self, raw):
         gift = self.gift(raw)
-        slug = raw.get("tg_id", "")
-        url = "https://t.me/nft/" + slug if not gift.id.startswith("portals:") else None
+        # Open the exact Portals listing, not Telegram's read-only collectible
+        # page.  The user can review the current price and complete the purchase
+        # inside the official Portals mini app.
+        url = "https://t.me/portals/market?startapp=gift_" + str(raw["id"])
         floor = Decimal(raw.get("floor_price") or "0")
         return Listing(self.name, raw["id"], gift, positive(raw["price"]), "GRAM", url,
                        date(raw.get("unlocks_at")), floor or None)
@@ -145,6 +147,18 @@ class Portals:
             if len(result["results"]) < 40:
                 break
         return output
+
+    async def search(self, text):
+        query = text.strip()[:80]
+        if not query:
+            return await self.listings()
+        collections = await self.get("/collections", search=query, limit=10)
+        ids = [str(item["id"]) for item in collections.get("collections", []) if item.get("id")]
+        if not ids:
+            return []
+        result = await self.get("/nfts/search", collection_ids=",".join(ids), status="listed",
+                                limit=120, offset=0, sort_by="price asc")
+        return [self.listing(raw) for raw in result.get("results", []) if raw.get("status") == "listed"]
 
     async def sales(self):
         if self.webapp:
