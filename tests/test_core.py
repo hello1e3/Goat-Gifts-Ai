@@ -90,6 +90,20 @@ async def test_manual_payment_idempotency_price_snapshot_renewal_refund(db):
         assert (await profile(conn, 1))["active"]
 
 
+async def test_subscription_terms_have_separate_orders_and_duration(db):
+    async with db.transaction() as conn:
+        await user(conn)
+        monthly = await order(conn, 1, [], term_days=30)
+        half_year = await order(conn, 1, [], term_days=180)
+        year = await order(conn, 1, [], term_days=365)
+        assert monthly["plan_id"] == "GOAT PRO"
+        assert half_year["plan_id"] == "GOAT PRO 180"
+        assert year["plan_id"] == "GOAT PRO 365"
+        assert (monthly["amount"], half_year["amount"], year["amount"]) == (250, 1250, 2250)
+        assert (monthly["duration_seconds"], half_year["duration_seconds"], year["duration_seconds"]) == (
+            30 * DAY, 180 * DAY, 365 * DAY)
+
+
 async def test_hundred_free_accesses_are_not_sales(db):
     async with db.transaction() as conn:
         for uid in range(1000, 1100):
@@ -293,6 +307,44 @@ async def test_portals_webapp_token_uses_public_api_contract():
 
     assert requests[0].url.path == "/api/nfts/search"
     assert requests[0].headers["Authorization"] == "tma SYNTHETIC"
+
+
+async def test_portals_search_returns_cheapest_exact_purchase_links():
+    from uuid import UUID
+
+    listing_id = str(UUID(int=11))
+    collection_id = str(UUID(int=12))
+    requests = []
+    raw = {
+        "id": listing_id, "tg_id": "PlushPepe-7", "collection_id": collection_id,
+        "name": "Plush Pepe", "external_collection_number": 7, "floor_price": "10",
+        "price": "8", "status": "listed", "unlocks_at": None,
+        "photo_url": "https://cdn.example.test/pepe.webp", "attributes": [
+            {"type": "Model", "value": "Pumpkin", "rarity_per_mille": 10},
+            {"type": "Backdrop", "value": "Onyx Black", "rarity_per_mille": 20},
+            {"type": "Symbol", "value": "Illuminati", "rarity_per_mille": 30},
+        ],
+    }
+
+    async def transport(request):
+        requests.append(request)
+        if request.url.path == "/api/collections":
+            return httpx.Response(200, json={"collections": [{"id": collection_id}]})
+        if request.url.path == "/api/nfts/search":
+            return httpx.Response(200, json={"results": [raw], "total_count": 1})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = Portals(client, "tma SYNTHETIC")
+        adapter.next_call = 0
+        results = await adapter.search("pepe")
+
+    assert len(results) == 1
+    assert results[0].price == Decimal("8") and results[0].currency == "GRAM"
+    assert results[0].url == f"https://t.me/portals/market?startapp=gift_{listing_id}"
+    assert requests[0].url.params["search"] == "pepe"
+    assert requests[1].url.params["collection_ids"] == collection_id
+    assert requests[1].url.params["sort_by"] == "price asc"
 
 
 async def test_market_unavailable_stale_and_restart(db):
