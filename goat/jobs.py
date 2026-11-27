@@ -84,17 +84,31 @@ async def deliver(bot, conn, entry, app_url):
             where t.id=:id and h.status='online' and e.status='online'
               and t.state in ('potential','active_offer','risky') and t.observed_at>now()-interval '3 minutes'
         """, id=data["signal"])
-        if not access or not access["active"] or not access["prefs"].get("signals") or not signal:
+        if not access or not access["active"] or not access["prefs"].get("signals", True) or not signal:
             return False
         d = signal["details"]
-        data = {"text": (f"Найдена торговая возможность\n{d['title']}\n"
-                         f"{d['market']} → {d['exit_market']}\nПокупка {d['purchase']} {d['currency']}\n"
-                         f"Оценка продажи {d['sale']} {d['currency']}\nСебестоимость {d['cost']} {d['currency']}\n"
-                         f"Расчётная прибыль {Decimal(d['profit']):.2f} {d['currency']} · ROI {Decimal(d['roi']):.2f}%\n"
-                         f"{d['risk']}"), "emoji": "gift"}
+        text = (f"🔥 ДЕШЁВЫЙ ПОДАРОК НАЙДЕН\n\n"
+                f"🎁 {d['title']} #{d['number']}\n"
+                f"🎨 {d['model']} · {d['backdrop']} · {d['symbol']}\n\n"
+                f"🛒 Купить: {Decimal(d['purchase']):.2f} {d['currency']}\n"
+                f"📊 Ориентир выхода: {Decimal(d['sale']):.2f} {d['currency']}\n"
+                f"💳 Полная себестоимость: {Decimal(d['cost']):.2f} {d['currency']}\n"
+                f"💰 Чистая выручка: {Decimal(d['proceeds']):.2f} {d['currency']}\n"
+                f"📈 Расчётная прибыль: +{Decimal(d['profit']):.2f} {d['currency']}\n"
+                f"🚀 ROI: +{Decimal(d['roi']):.2f}%\n"
+                f"🛡 После запаса 5%: {Decimal(d['conservative_profit']):+.2f} {d['currency']}\n\n"
+                f"⚠️ {d['risk']}")
+        data = {"text": text, "emoji": "gift"}
+        if isinstance(d.get("image"), str) and d["image"].startswith("https://"):
+            data.update(media=d["image"], type="photo")
+        actions = []
+        if d.get("url"):
+            actions.append({"text": "🛒 Купить в Portals", "url": d["url"]})
         if app_url:
-            markup = buttons(({"text": "Подробнее в терминале",
-                               "web_app": WebAppInfo(url=f"{app_url.rstrip('/')}/?signal={signal['id']}")},))
+            actions.append({"text": "📊 Открыть аналитику",
+                            "web_app": WebAppInfo(url=f"{app_url.rstrip('/')}/?signal={signal['id']}")})
+        if actions:
+            markup = buttons(tuple(actions))
     custom = data.get("entities")
     if data.get("media"):
         send = getattr(bot, "send_" + data["type"])
@@ -104,7 +118,10 @@ async def deliver(bot, conn, entry, app_url):
                 return True
             except TelegramBadRequest:
                 pass
-        await send(uid, data["media"], caption=data.get("text"), reply_markup=markup)
+        try:
+            await send(uid, data["media"], caption=data.get("text"), reply_markup=markup)
+        except TelegramBadRequest:
+            await bot.send_message(uid, data["text"], reply_markup=markup)
     elif custom:
         try:
             await bot.send_message(uid, data["text"], entities=custom, reply_markup=markup)
@@ -217,9 +234,10 @@ async def fanout(conn):
     """)
     now = datetime.now(UTC)
     subscribers = await rows(conn, """
-        select u.id,p.prefs from users u join user_settings p on p.user_id=u.id
+        select u.id,coalesce(p.prefs,'{"signals":true}'::jsonb) prefs
+        from users u left join user_settings p on p.user_id=u.id
         join subscriptions s on s.user_id=u.id where not u.blocked and not u.unreachable and not u.erased
-          and s.frozen_at is null and (p.prefs->>'signals')::boolean and exists (
+          and s.frozen_at is null and coalesce((p.prefs->>'signals')::boolean,true) and exists (
           select 1 from access_grants g where g.user_id=u.id and g.revoked_at is null and g.starts_at<=now()
             and (g.ends_at is null or g.ends_at>now()))
     """)
