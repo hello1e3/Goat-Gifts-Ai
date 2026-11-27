@@ -19,7 +19,7 @@ from goat.config import Config
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, calculate
 from goat.jobs import EmojiManager, fanout, outbox
-from goat.market import Gift, Listing, MRKT, Offer, Portals, Sale, candidates, scan
+from goat.market import Gift, Listing, MRKT, Offer, Portals, Sale, candidates, listing_analysis, scan
 from goat.terminal import PortfolioInput, Preferences, add_item, close_item, portfolios, save_prefs, signals
 
 TOKEN = "123456789:TEST_DATA_ONLY"
@@ -264,6 +264,19 @@ def test_live_floor_discount_produces_real_calculated_profit_without_sales():
     assert details["sale"] == Decimal("10")
     assert details["profit"] == Decimal("1.72")
     assert details["roi"] > 20
+
+
+def test_catalog_analysis_uses_real_peer_reference_and_fees():
+    gift = Gift("cheap-1", "Cheap", 1, "Cheap", "Model", "Back", "Sym", None, None)
+    cheap = Listing("Portals", "cheap", gift, Decimal("5"), "GRAM", "https://t.me/portals/market", None)
+    peers = [cheap] + [Listing("Portals", str(index), gift, Decimal(price), "GRAM", None, None)
+                       for index, price in enumerate(("8", "9", "10", "11"), 1)]
+    details = listing_analysis(cheap, peers)
+    assert details["reference_basis"] == "нижний квартиль активных лотов"
+    assert details["sale"] == Decimal("8")
+    assert details["sell_commission"] == Decimal(".200")
+    assert details["profit"] == Decimal("2.800")
+    assert details["conservative_profit"] > 0
 
 
 async def test_mrkt_contract_pagination_and_nanoton_price():
