@@ -13,7 +13,8 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, PreCheckoutQuery, WebAppInfo
 
 from goat.accounts import audit, enqueue, grant, manage_access, notify_admins, profile, register
-from goat.billing import DAY, PLAN, approve, checkout, history, order, payment, record_refund, redeem, statistics
+from goat.billing import (DAY, PLAN, approve, card_request, card_settings, checkout, history, order, payment,
+                          record_refund, redeem, review_card, statistics)
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation
 from goat.jobs import EMOJIS, EmojiManager, buttons
@@ -26,12 +27,12 @@ ADMIN = {
     "Продажи": "/stats 30",
     "Заявки": "/orders",
     "Подписки": "/access ID freeze|unfreeze|revoke|block|unblock",
-    "Цена": "/price ЧИСЛО",
-    "Выдать доступ": "/grant ID или @username 24h|3d|7d|14d|30d|90d|forever|СРОКd [причина]",
+    "Цена": "/price ЧИСЛО — цена в Stars",
+    "Выдать доступ": "/access ID или @username 24h|3d|7d|14d|30d|90d|forever [причина]",
     "Поддержка": "/tickets",
     "Рассылка": "/broadcast all|active|paid|free|none|expired|new МИНУТЫ ТЕКСТ [| кнопка | https://…]",
     "Промокоды": "/promocreate КОД percent|fixed|days ЗНАЧЕНИЕ ДНИ_ДЕЙСТВИЯ ЛИМИТ НА_ПОЛЬЗОВАТЕЛЯ 0|1",
-    "Настройки": "/plan automatic|manual|on|off\n/description ТЕКСТ\n/discount ЦЕНА ЧАСЫ\n/fees Portals|MRKT JSON\n/rate GRAM TON КУРС ИСТОЧНИК\n/legal JSON\n/report ЧАС_UTC|off",
+    "Настройки": "/plan automatic|manual|on|off\n/description ТЕКСТ\n/discount ЦЕНА ЧАСЫ\n/card СУММА|БАНК|ПОЛУЧАТЕЛЬ|РЕКВИЗИТЫ или /card off\n/fees Portals|MRKT JSON\n/rate GRAM TON КУРС ИСТОЧНИК\n/legal JSON\n/report ЧАС_UTC|off",
     "Сервер": "/server",
     "Эмодзи": "/emojiset КАТЕГОРИЯ [кастомный эмодзи]\n/emoji [кастомный эмодзи]",
 }
@@ -62,7 +63,7 @@ async def resolve(conn, value):
 def user_menu(config):
     items = []
     if config.app_url:
-        items.append(({"text": "🚀 Открыть терминал", "web_app": WebAppInfo(url=config.app_url)},))
+        items.append(({"text": "🚀 Открыть GOAT NFT", "web_app": WebAppInfo(url=config.app_url)},))
     items.extend([
         ({"text": "💎 Купить подписку", "callback_data": "buy"},
          {"text": "👤 Мой профиль", "callback_data": "profile"}),
@@ -88,7 +89,48 @@ def make_dispatcher(db, config):
     async def touch(conn, user, source=None):
         return await register(conn, user.id, user.username, user.full_name, source=source, bot=True)
 
-    async def create_order(message, user, code=None):
+    def admin_menu():
+        labels = list(ADMIN)
+        return buttons(*[
+            tuple({"text": label, "callback_data": f"owner:{index+j}"}
+                  for j, label in enumerate(labels[index:index+2]))
+            for index in range(0, len(labels), 2)
+        ])
+
+    def admin_back():
+        return buttons(({"text": "← Админка", "callback_data": "owner:home"},))
+
+    async def edit_or_answer(call, text, markup=None):
+        try:
+            await call.message.edit_text(text[:4000], reply_markup=markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in exc.message.lower():
+                await call.message.answer(text[:4000], reply_markup=markup)
+
+    async def payment_menu(target, user, *, edit=False):
+        async with db.transaction() as conn:
+            await touch(conn, user)
+            plan = await one(conn, "select price,enabled,discount,discount_until from subscription_plans where id=:id", id=PLAN)
+            card = await card_settings(conn)
+        choices = []
+        lines = ["💎 GOAT PRO · 30 дней", "Выберите способ оплаты."]
+        if plan and plan["enabled"] and plan["price"]:
+            price = plan["price"]
+            if plan["discount_until"] and plan["discount_until"] > datetime.now(UTC):
+                price = min(price, plan["discount"] or price)
+            choices.append(({"text": f"⭐ Telegram Stars · {price}", "callback_data": "pay:stars"},))
+        if card and card.get("enabled") and card.get("amount"):
+            choices.append(({"text": f"💳 Перевод · {card['amount']} ₽", "callback_data": "pay:card"},))
+        if not choices:
+            lines.append("Продажи сейчас закрыты. Настройте цену в админке.")
+        choices.append(({"text": "← Главное меню", "callback_data": "home"},))
+        markup = buttons(*choices)
+        if edit:
+            await edit_or_answer(target, "\n".join(lines), markup)
+        else:
+            await target.answer("\n".join(lines), reply_markup=markup)
+
+    async def create_order(user, code=None):
         async with db.transaction() as conn:
             await touch(conn, user)
             entry = await order(conn, user.id, config.admins, code)
@@ -102,9 +144,9 @@ def make_dispatcher(db, config):
                         update notification_deliveries set status='queued',attempts=0,run_at=now()
                         where user_id=:uid and dedupe in (:a,:b) and run_at<now()-interval '30 seconds'
                     """, uid=user.id, a=f"invoice:{entry['id']}", b=f"decision:{entry['id']}")
-        await message.answer(f"⏳ Заявка ожидает одобрения · {entry['amount']} Stars."
-                             if entry["status"] == "pending_approval" else
-                             f"Счёт GOAT PRO · {entry['amount']} Stars. Проверьте чат с ботом.")
+        return (f"⏳ Заявка ожидает одобрения · {entry['amount']} Stars."
+                if entry["status"] == "pending_approval" else
+                f"Счёт GOAT PRO · {entry['amount']} Stars. Проверьте чат с ботом.")
 
     async def show_profile(message, user):
         async with db.transaction() as conn:
@@ -142,23 +184,20 @@ def make_dispatcher(db, config):
                     response = f"\n{exc}"
             data = await profile(conn, message.from_user.id)
             await EmojiManager.send(message.bot, conn, message.from_user.id, (
-                "GOAT Gifts AI\nТерминал коллекционных Telegram Gifts.\n"
-                + ("GOAT PRO активен." if data["active"] else "Доступен демонстрационный терминал.") + response),
+                "GOAT NFT\nУмный сканер коллекционных Telegram Gifts.\n"
+                + ("GOAT PRO активен." if data["active"] else "Доступен демонстрационный режим.") + response),
                 "logo", reply_markup=user_menu(config))
         if source == "support":
             await support_menu(message)
         if source == "buy":
-            try:
-                await create_order(message, message.from_user)
-            except ValueError as exc:
-                await message.answer(str(exc))
+            await payment_menu(message, message.from_user)
 
     @router.message(Command("buy", "profile", "support", "paysupport", "promo", "terms", "privacy", "unsubscribe"))
     async def client_commands(message: Message, command: CommandObject):
         cmd, uid = command.command, message.from_user.id
         try:
             if cmd == "buy":
-                await create_order(message, message.from_user, command.args)
+                await payment_menu(message, message.from_user)
             elif cmd == "profile":
                 await show_profile(message, message.from_user)
             elif cmd in {"support", "paysupport"}:
@@ -234,7 +273,7 @@ def make_dispatcher(db, config):
 
     @router.message(Command(*("admin stats user price description plan discount grant invite access orders refund "
                                "tickets reply close_ticket dm promocreate promotoggle promolist broadcast bstats bcancel "
-                               "server emojiset fees rate legal report".split())))
+                               "server emojiset fees rate legal report card".split())))
     async def owner(message: Message, command: CommandObject):
         uid = message.from_user.id
         if uid not in config.admins:
@@ -242,10 +281,7 @@ def make_dispatcher(db, config):
         name, raw = command.command, command.args or ""
         args = raw.split()
         if name == "admin":
-            labels = list(ADMIN)
-            await message.answer("👑 GOAT Gifts AI · Администрирование", reply_markup=buttons(*[
-                tuple({"text": label, "callback_data": f"owner:{index+j}"} for j, label in enumerate(labels[index:index+2]))
-                for index in range(0, len(labels), 2)]))
+            await message.answer("👑 GOAT NFT · Администрирование", reply_markup=admin_menu())
             return
         try:
             payload = {}
@@ -305,13 +341,15 @@ def make_dispatcher(db, config):
                     return
                 if name in {"grant", "access", "dm"}:
                     payload["target"] = await resolve(conn, args[0])
-                if name == "grant":
+                if name == "grant" or (name == "access" and len(args) > 1 and
+                                       (args[1] == "forever" or re.fullmatch(r"[1-9][0-9]{0,3}[hd]", args[1]))):
                     term = args[1]
                     match = re.fullmatch(r"([1-9][0-9]{0,3})(h|d)", term)
                     if term != "forever" and not match:
                         raise ValueError("Укажите срок, например 24h, 30d или forever")
                     payload["seconds"] = None if term == "forever" else int(match[1]) * (DAY if match[2] == "d" else 3600)
                     payload["reason"] = " ".join(args[2:])[:500]
+                    name = "grant"
                 elif name == "invite":
                     payload["days"] = int(args[0])
                     if not 1 <= payload["days"] <= 3650:
@@ -421,6 +459,16 @@ def make_dispatcher(db, config):
                     if hour is not None and not 0 <= hour < 24:
                         raise ValueError("/report ЧАС_UTC|off")
                     payload = {"hour": hour}
+                elif name == "card":
+                    if raw.strip().lower() == "off":
+                        payload = {"enabled": False}
+                    else:
+                        amount, bank, recipient, requisite = [part.strip() for part in raw.split("|", 3)]
+                        value = Decimal(amount.replace(",", "."))
+                        if value <= 0 or value > 1000000 or not all((bank, recipient, requisite)):
+                            raise ValueError("/card СУММА|БАНК|ПОЛУЧАТЕЛЬ|РЕКВИЗИТЫ")
+                        payload = {"enabled": True, "amount": str(value), "bank": bank[:120],
+                                   "recipient": recipient[:120], "requisite": requisite[:300]}
             await confirm(message, uid, name, payload, summary)
         except (IndexError, ValueError, ArithmeticError, TypeError) as exc:
             await message.answer(f"Проверьте параметры. {exc}")
@@ -523,9 +571,13 @@ def make_dispatcher(db, config):
         elif action == "rate":
             await query(conn, """insert into currency_rates values(:base,:quote,now(),cast(cast(:rate as text) as numeric),:source)""",
                         **p)
-        elif action in {"legal", "report"}:
+        elif action in {"legal", "report", "card"}:
             await query(conn, """insert into system_settings values(:key,cast(:data as jsonb))
-                               on conflict(key) do update set value=excluded.value""", key=action, data=json.dumps(p))
+                               on conflict(key) do update set value=excluded.value""",
+                        key="card_payment" if action == "card" else action, data=json.dumps(p))
+        elif action == "card_review":
+            await review_card(conn, UUID(p["id"]), actor, p["allow"])
+            return "Перевод подтверждён, доступ выдан." if p["allow"] else "Заявка отклонена."
         else:
             raise ValueError("Неизвестное действие")
         await audit(conn, actor, action, target, **{k: v for k, v in p.items()
@@ -540,14 +592,45 @@ def make_dispatcher(db, config):
         uid, data = call.from_user.id, call.data or ""
         await call.answer()
         try:
-            if data == "buy":
-                await create_order(call.message, call.from_user)
+            if data == "home":
+                await edit_or_answer(call, "GOAT NFT\nАналитика и инструменты для Telegram Gifts.", user_menu(config))
+            elif data == "buy":
+                await payment_menu(call, call.from_user, edit=True)
+            elif data == "pay:stars":
+                result = await create_order(call.from_user)
+                await edit_or_answer(call, result, buttons(
+                    ({"text": "← Способы оплаты", "callback_data": "buy"},),
+                    ({"text": "← Главное меню", "callback_data": "home"},)))
+            elif data == "pay:card":
+                async with db.transaction() as conn:
+                    await touch(conn, call.from_user)
+                    card = await card_settings(conn)
+                if not card or not card.get("enabled"):
+                    raise ValueError("Оплата переводом сейчас недоступна")
+                await edit_or_answer(call, (
+                    f"💳 Перевод за GOAT PRO · 30 дней\n\n"
+                    f"Сумма · {card['amount']} ₽\nБанк · {card['bank']}\n"
+                    f"Получатель · {card['recipient']}\nРеквизиты · {card['requisite']}\n\n"
+                    "После перевода нажмите кнопку ниже. Администратор проверит поступление."), buttons(
+                    ({"text": "Я перевёл — проверить", "callback_data": "card:request"},),
+                    ({"text": "← Способы оплаты", "callback_data": "buy"},)))
+            elif data == "card:request":
+                async with db.transaction() as conn:
+                    await touch(conn, call.from_user)
+                    request = await card_request(conn, uid)
+                    await notify_admins(conn, config.admins, f"card-request:{request['id']}",
+                        text=(f"💳 Проверить перевод\nTelegram ID · {uid}\n"
+                              f"Сумма · {request['amount']} ₽\nЗаявка · {request['id']}"),
+                        card_request=str(request["id"]))
+                await edit_or_answer(call, "⏳ Заявка отправлена. Подписка включится после проверки перевода.",
+                                     buttons(({"text": "← Главное меню", "callback_data": "home"},)))
             elif data == "profile":
                 await show_profile(call.message, call.from_user)
             elif data == "about":
-                await call.message.answer("GOAT Gifts AI анализирует рынок подарков. В терминале доступны демо, "
-                                          "виртуальный портфель и калькулятор. С GOAT PRO открываются актуальные сигналы, "
-                                          "если подключены источники рыночных данных.", reply_markup=user_menu(config))
+                await edit_or_answer(call, "GOAT NFT анализирует рынок подарков. В приложении доступны демо, "
+                                     "портфель и калькулятор. GOAT PRO открывает актуальные сигналы, "
+                                     "когда подключены источники рыночных данных.",
+                                     buttons(({"text": "← Главное меню", "callback_data": "home"},)))
             elif data == "support":
                 await support_menu(call.message)
             elif data.startswith(("category:", "ticket:", "toggle:")):
@@ -606,19 +689,40 @@ def make_dispatcher(db, config):
                     await call.message.answer(result[:4000])
             elif uid in config.admins:
                 if data.startswith("owner:"):
-                    label = list(ADMIN)[int(data.split(":")[1])]
-                    direct = {"Статистика": ("stats", "1"), "Продажи": ("stats", "30"),
-                              "Заявки": ("orders", ""), "Поддержка": ("tickets", ""), "Сервер": ("server", "")}
-                    if label in direct:
-                        cmd, args = direct[label]
-                        await owner(call.message.model_copy(update={"from_user":call.from_user}),
-                                    CommandObject(command=cmd, args=args))
+                    value = data.split(":", 1)[1]
+                    if value == "home":
+                        await edit_or_answer(call, "👑 GOAT NFT · Администрирование", admin_menu())
+                        return
+                    label = list(ADMIN)[int(value)]
+                    if label in {"Статистика", "Продажи"}:
+                        async with db.transaction() as conn:
+                            report = await statistics(conn, 1 if label == "Статистика" else 30)
+                        await edit_or_answer(call, f"📊 {label}\n\n{stats_text(report)}", admin_back())
+                    elif label in {"Заявки", "Поддержка", "Сервер"}:
+                        statements = {
+                            "Заявки": "select id,user_id,amount,status,expires_at from orders where status='pending_approval' order by created_at desc limit 15",
+                            "Поддержка": "select id,user_id,category,status,unread_admin from support_tickets where status<>'closed' order by unread_admin desc,id desc limit 15",
+                            "Сервер": "select component,status,checked_at from system_health",
+                        }
+                        async with db.transaction() as conn:
+                            entries = await rows(conn, statements[label])
+                        markup = admin_back()
+                        if label == "Заявки" and entries:
+                            markup = buttons(*[({"text": f"Одобрить · {row['user_id']}", "callback_data": f"review:y:{row['id']}"},
+                                                {"text": "Отклонить", "callback_data": f"review:n:{row['id']}"}) for row in entries],
+                                             ({"text": "← Админка", "callback_data": "owner:home"},))
+                        elif label == "Поддержка" and entries:
+                            markup = buttons(*[({"text": f"Открыть #{row['id']}", "callback_data": f"ticket:{row['id']}"},) for row in entries],
+                                             ({"text": "← Админка", "callback_data": "owner:home"},))
+                        text = "\n".join(" · ".join(map(str, row.values())) for row in entries) or "Записей нет."
+                        await edit_or_answer(call, f"{label}\n\n{text}"[:4000], markup)
                     elif label == "Выдать доступ":
                         async with db.transaction() as conn:
                             await set_admin_input(conn, uid, {"action":"grant_user"})
-                        await call.message.answer("Введите Telegram ID или @username. Для приглашения используйте /invite ДНИ.")
+                        await edit_or_answer(call, "Введите Telegram ID или @username следующим сообщением.\n"
+                                                   "Для приглашения используйте /invite ДНИ.", admin_back())
                     else:
-                        await call.message.answer(ADMIN[label])
+                        await edit_or_answer(call, f"{label}\n\n{ADMIN[label]}", admin_back())
                 elif data.startswith("granttime:"):
                     _, target, seconds = data.split(":")
                     async with db.transaction() as conn:
@@ -640,6 +744,11 @@ def make_dispatcher(db, config):
                     _, decision, oid = data.split(":")
                     await confirm(call.message, uid, "review", {"allow": decision == "y", "id": str(UUID(oid))},
                                   "Подтвердить решение по заявке?")
+                elif data.startswith("cardreview:"):
+                    _, decision, request_id = data.split(":")
+                    await confirm(call.message, uid, "card_review",
+                                  {"allow": decision == "y", "id": str(UUID(request_id))},
+                                  "Подтвердить решение по переводу?")
                 elif data.startswith(("confirm:", "cancel:")):
                     action, token = data.split(":", 1)
                     async with db.transaction() as conn:
@@ -654,9 +763,9 @@ def make_dispatcher(db, config):
                         elif action == "confirm":
                             result = await apply(conn, stored, call)
                         await query(conn, "delete from system_settings where key=:k", k=f"confirm:{token}")
-                    await call.message.answer(result)
+                    await edit_or_answer(call, result, admin_back())
         except (ValueError, IndexError, ArithmeticError) as exc:
-            await call.message.answer(str(exc))
+            await edit_or_answer(call, str(exc), admin_back() if uid in config.admins else None)
 
     @router.message()
     async def inbox(message: Message):
@@ -680,7 +789,7 @@ def make_dispatcher(db, config):
                                  ("30 дней",30*DAY),("90 дней",90*DAY),("Навсегда","forever"))
                         await message.answer(f"Срок доступа для {target}", reply_markup=buttons(*[
                             ({"text":label,"callback_data":f"granttime:{target}:{seconds}"},) for label,seconds in terms]))
-                        await message.answer(f"Для своего срока используйте /grant {target} 45d [причина].")
+                        await message.answer(f"Для своего срока используйте /access {target} 45d [причина].")
                     elif pending["action"] == "grant_reason":
                         p = {"target":pending["target"],"seconds":pending["seconds"],
                              "reason":"" if body == "-" else (body or "")[:500]}
@@ -740,3 +849,4 @@ async def set_admin_input(conn, uid, payload):
         insert into system_settings(key,value) values(:key,cast(:v as jsonb))
         on conflict(key) do update set value=excluded.value
     """, key=f"admin-input:{uid}", v=json.dumps(payload))
+

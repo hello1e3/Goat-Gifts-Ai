@@ -60,6 +60,10 @@ async def deliver(bot, conn, entry, app_url):
         oid = data["approval"]
         markup = buttons(({"text": "Одобрить", "callback_data": f"review:y:{oid}"},
                           {"text": "Отклонить", "callback_data": f"review:n:{oid}"}))
+    if data.get("card_request"):
+        request_id = data["card_request"]
+        markup = buttons(({"text": "✅ Подтвердить перевод", "callback_data": f"cardreview:y:{request_id}"},
+                          {"text": "Отклонить", "callback_data": f"cardreview:n:{request_id}"}))
     if data.get("ticket"):
         tid = data["ticket"]
         markup = buttons(({"text": "Открыть обращение", "callback_data": f"ticket:{tid}"},))
@@ -245,3 +249,4 @@ async def loop(delay, operation):
             log.exception("Background job failed")
             interval = None
         await asyncio.sleep(delay if interval is None else interval)
+

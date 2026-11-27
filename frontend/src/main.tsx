@@ -2,11 +2,12 @@ import {useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode} fr
 import {createRoot} from 'react-dom/client'
 import {motion, MotionConfig} from 'framer-motion'
 import {AreaSeries, ColorType, createChart, type UTCTimestamp} from 'lightweight-charts'
-import {Activity, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Bell, ChartNoAxesCombined, ChevronDown, CircleHelp, FlaskConical, Gem, Globe2, LayoutDashboard, Radio, ScanLine, Settings2, ShieldCheck, UserRound, Wallet, X} from 'lucide-react'
+import {Activity, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Bell, ChartNoAxesCombined, ChevronDown, CircleHelp, FlaskConical, Gem, Globe2, LayoutDashboard, Radio, ScanLine, Search, Settings2, ShieldCheck, UserRound, Wallet, X} from 'lucide-react'
 import './style.css'
 import snoop from './art/snoopdogg-223555.jpg'
 import pepe from './art/plushpepe-1.jpg'
 import cap from './art/durovscap-1.jpg'
+import goatMark from './art/goat-mark.png'
 
 const demoArt:Record<string,string>={'snoopdogg-223555':snoop,'plushpepe-1':pepe,'durovscap-1':cap}
 
@@ -60,7 +61,8 @@ function telegramSlug(signal:Signal){
 }
 function Art({signal,large=false}:{signal:Signal;large?:boolean}){
  const d=signal.details, slug=telegramSlug(signal)
- const original=slug?(signal.state==='demo'?demoArt[slug]:'/gift-preview/'+slug):undefined
+ const original=typeof d.image==='string'&&d.image.startsWith('https://')?d.image:
+  slug?(signal.state==='demo'?demoArt[slug]:'/gift-preview/'+slug):undefined
  const [failed,setFailed]=useState<string>()
  const showOriginal=original&&failed!==original
  return <div className={`art gift-art ${large?'art-large':''}`}>
@@ -72,9 +74,10 @@ function Art({signal,large=false}:{signal:Signal;large?:boolean}){
 function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
  const d=signal.details
  return <button className="signal-card" onClick={onClick}>
-  <div className="signal-media"><Art signal={signal}/><span className="strategy">{strategyNames[signal.strategy]}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
-  <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.market}</small></div><span className="roi">+{f(d.roi)}%</span></div>
-  <div className="card-values"><div><small>Покупка</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Оценка продажи</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Прибыль</small><b className="green">+{f(d.profit)}</b></div></div></div>
+  <div className="signal-media"><Art signal={signal}/><span className="strategy">{d.market}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
+  <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div>{signal.state!=='listed'&&<span className="roi">+{f(d.roi)}%</span>}</div>
+  <div className="gift-attributes"><span>{d.symbol}</span><span>{strategyNames[signal.strategy]}</span></div>
+  <div className="card-values"><div><small>{signal.state==='listed'?'Цена сейчас':'Покупка'}</small><b>{f(d.purchase)} {d.currency}</b></div>{signal.state!=='listed'&&<><div><small>Оценка продажи</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Прибыль</small><b className="green">+{f(d.profit)}</b></div></>}</div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
@@ -82,11 +85,13 @@ function App(){
  const [page,setPage]=useState('Главная')
  const [samples,setSamples]=useState<Signal[]>([])
  const [live,setLive]=useState<Signal[]>([])
+ const [catalogItems,setCatalogItems]=useState<Signal[]>([])
  const [markets,setMarkets]=useState<Market[]>([])
  const [me,setMe]=useState<Profile>()
  const [items,setItems]=useState<Item[]>([])
  const [selected,setSelected]=useState<Signal>()
  const [loading,setLoading]=useState(true)
+ const [showSplash,setShowSplash]=useState(true)
  const [toast,setToast]=useState('')
  const [range,setRange]=useState(14)
  const [filter,setFilter]=useState('all')
@@ -102,25 +107,29 @@ function App(){
  const [closing,setClosing]=useState<number>()
  const [prefs,setPrefs]=useState<Prefs>()
  const [showPrefs,setShowPrefs]=useState(false)
+ const [advancedPrefs,setAdvancedPrefs]=useState(false)
+ const [search,setSearch]=useState('')
  const [busy,setBusy]=useState(false)
  const [pendingVerify,setPendingVerify]=useState<string>()
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
  const loadItems=async()=>setItems(await api<Item[]>('/portfolio'))
  const liveFeed=async()=>setLive(await api<Signal[]>('/signals'))
+ const catalogFeed=async()=>setCatalogItems(await api<Signal[]>('/catalog'))
  const announce=(e:unknown)=>setToast(e instanceof Error?e.message:String(e))
  const change=(name:string)=>{tg?.HapticFeedback?.selectionChanged();setPage(name);setFilter('all');setMarket('all');window.scrollTo(0,0)}
  const run=async(task:()=>Promise<void>)=>{if(busy)return;setBusy(true);try{await task()}catch(e){announce(e)}finally{setBusy(false)}}
  useEffect(()=>{
   tg?.ready();tg?.expand()
   Promise.allSettled([api<Signal[]>('/demo').then(setSamples),api<Market[]>('/market-status').then(setMarkets),
-   ...(auth?[loadMe().then(profile=>profile.active?liveFeed():undefined),loadItems()]:[])])
+   ...(auth?[loadMe().then(profile=>profile.active?Promise.all([liveFeed(),catalogFeed()]):undefined),loadItems()]:[])])
    .then(results=>{const failure=results.find(result=>result.status==='rejected');if(failure?.status==='rejected')announce(failure.reason)})
    .finally(()=>setLoading(false))
  },[])
+ useEffect(()=>{if(loading)return;const id=window.setTimeout(()=>setShowSplash(false),650);return()=>clearTimeout(id)},[loading])
  useEffect(()=>{if(!toast)return;const id=window.setTimeout(()=>setToast(''),4800);return()=>clearTimeout(id)},[toast])
  useEffect(()=>{
   if(!me?.active)return
-  const id=window.setInterval(()=>{void liveFeed().catch(()=>setLive([]));void api<Market[]>('/market-status').then(setMarkets).catch(()=>{})},30000)
+  const id=window.setInterval(()=>{void liveFeed().catch(()=>setLive([]));void catalogFeed().catch(()=>setCatalogItems([]));void api<Market[]>('/market-status').then(setMarkets).catch(()=>{})},30000)
   return()=>clearInterval(id)
  },[me?.active])
  useEffect(()=>{
@@ -138,8 +147,13 @@ function App(){
  },[page,period,me?.active])
  const isDemo=!me?.active
  const source=isDemo?samples:live
- const display=useMemo(()=>source.filter(s=>(filter==='all'||s.strategy===filter)&&(market==='all'||s.details.market===market))
-    .sort((a,b)=>sort==='roi'?Number(b.details.roi)-Number(a.details.roi):sort==='cost'?Number(a.details.cost)-Number(b.details.cost):0),[source,filter,market,sort])
+ const searchable=isDemo?samples:(catalogItems.length?catalogItems:live)
+ const display=useMemo(()=>searchable.filter(s=>{
+    const q=search.trim().toLocaleLowerCase('ru-RU')
+    const haystack=[s.details.title,s.details.collection,s.details.model,s.details.backdrop,s.details.symbol,s.details.number].join(' ').toLocaleLowerCase('ru-RU')
+    return (!q||haystack.includes(q))&&(filter==='all'||s.strategy===filter)&&(market==='all'||s.details.market===market)
+   })
+    .sort((a,b)=>sort==='roi'?Number(b.details.roi)-Number(a.details.roi):sort==='cost'?Number(a.details.cost)-Number(b.details.cost):0),[searchable,filter,market,sort,search])
  const chart=useMemo(()=>(source[0]?.details.history??[]).slice(-range),[source,range])
  const portfolio=items.filter(i=>i.virtual===virtual)
  const moneyTotals=useMemo(()=>Object.fromEntries(['TON','GRAM'].map(currency=>{
@@ -155,10 +169,10 @@ function App(){
   event.preventDefault();if(!prefs)return
   const form=new FormData(event.currentTarget)
   const next={...prefs}
-  for(const key of ['capital','roi','max_cost','min_profit'] as const)next[key]=String(form.get(key))
-  for(const key of ['liquidity','max_age_seconds','frequency_minutes'] as const)next[key]=Number(form.get(key))
-  for(const key of ['quiet_start','quiet_end'] as const)next[key]=form.get(key)===''?null:Number(form.get(key))
-  for(const key of ['collections','markets','strategies'] as const)next[key]=String(form.get(key)).split(',').map(x=>x.trim()).filter(Boolean)
+  for(const key of ['capital','roi','max_cost','min_profit'] as const)if(form.has(key))next[key]=String(form.get(key))
+  for(const key of ['liquidity','max_age_seconds','frequency_minutes'] as const)if(form.has(key))next[key]=Number(form.get(key))
+  for(const key of ['quiet_start','quiet_end'] as const)if(form.has(key))next[key]=form.get(key)===''?null:Number(form.get(key))
+  for(const key of ['collections','markets','strategies'] as const)if(form.has(key))next[key]=String(form.get(key)).split(',').map(x=>x.trim()).filter(Boolean)
   for(const key of ['signals','marketing','reminders'] as const)next[key]=form.get(key)==='on'
   void run(async()=>{setPrefs(await api<Prefs>('/me/preferences',{method:'PUT',body:JSON.stringify(next)}));if(me?.active)await liveFeed();setToast('Настройки сохранены');setShowPrefs(false)})
  }
@@ -172,19 +186,24 @@ function App(){
    entries.length?<div className="signal-grid">{entries.map(signal=><SignalCard key={signal.id} signal={signal} onClick={()=>setSelected(signal)}/>)}</div>:
     <div className="empty"><ScanLine size={25}/><strong>Подходящих сигналов пока нет</strong><span>Проверьте фильтры и состояние площадок.</span></div>
  }
- return <MotionConfig reducedMotion="user"><div className="shell">
+ return <MotionConfig reducedMotion="user"><div className="app-root">
+  {showSplash&&<div className={`splash ${loading?'':'splash-ready'}`} aria-label="GOAT NFT загружается">
+   <div className="splash-glow"/><img src={goatMark} alt=""/><strong>GOAT NFT</strong><small>умный сканер Telegram Gifts</small>
+   <div className="splash-dots" aria-hidden="true"><i/><i/><i/></div>
+  </div>}
+  <div className="shell">
   <aside className="sidebar">
-   <button className="brand" onClick={()=>change('Главная')}><span className="brand-icon"><Gem size={23} strokeWidth={2.4}/></span><span><strong>GOAT Gifts AI</strong><small>ТОРГОВЫЙ ТЕРМИНАЛ</small></span></button>
-   <div className="side-label">ТЕРМИНАЛ</div>
+   <button className="brand" onClick={()=>change('Главная')}><span className="brand-icon"><img src={goatMark} alt=""/></span><span><strong>GOAT NFT</strong><small>TELEGRAM GIFTS</small></span></button>
+   <div className="side-label">ПРИЛОЖЕНИЕ</div>
    <nav>{nav.map(n=><button title={n.name} key={n.name} className={page===n.name?'active':''} onClick={()=>change(n.name)}><n.icon size={19}/><span>{n.name}</span></button>)}
    {me?.admin&&<button className={page==='Владелец'?'active':''} onClick={()=>change('Владелец')}><ShieldCheck size={19}/><span>Владелец</span></button>}</nav>
    <div className="side-bottom"><button onClick={()=>bot('support')}><CircleHelp size={18}/><span>Поддержка</span></button><button onClick={()=>change('Профиль')} className="side-profile"><span className="avatar">{me?.photo?<img src={me.photo} alt=""/>:me?.name.slice(0,1)??'G'}</span><span><strong>{me?.name??'Гость'}</strong><small>{me?.active?'GOAT PRO':'Демо-доступ'}</small></span><ChevronDown size={14}/></button></div>
   </aside>
   <div className="work">
-   <header className="top"><div className="breadcrumb"><span className="mobile-brand"><Gem size={18}/></span><span>Терминал</span><span>/</span><strong>{page}</strong></div><div className="top-actions"><span className={'mode '+(!isDemo?'live':'')}><span/>{isDemo?'Демо-режим':'GOAT PRO'}</span><button className="icon-button" title="Настройки уведомлений" onClick={()=>{change('Профиль');setShowPrefs(true)}}><Bell size={18}/></button><button className="avatar" title="Профиль" onClick={()=>change('Профиль')}>{me?.name.slice(0,1)??'G'}</button></div></header>
+   <header className="top"><div className="breadcrumb"><span className="mobile-brand"><img src={goatMark} alt=""/></span><span>GOAT NFT</span><span>/</span><strong>{page}</strong></div><div className="top-actions"><span className={'mode '+(!isDemo?'live':'')}><span/>{isDemo?'Демо-режим':'GOAT PRO'}</span><button className="icon-button" title="Настройки уведомлений" onClick={()=>{change('Профиль');setShowPrefs(true)}}><Bell size={18}/></button><button className="avatar" title="Профиль" onClick={()=>change('Профиль')}>{me?.name.slice(0,1)??'G'}</button></div></header>
    <main><motion.div key={page} initial={{opacity:0,y:5}} animate={{opacity:1,y:0}} transition={{duration:.2}}>
    {page==='Главная'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> ОБЗОР РЫНКА</div><h1>{me?'Привет, '+me.name.split(' ')[0]:'Торговый терминал'}</h1><p>Оценивайте возможности на рынке коллекционных Telegram Gifts.</p></div><button className="primary" onClick={()=>change('Сканер')}><ScanLine size={17}/> Открыть сканер <ArrowRight size={16}/></button></div>
+    <div className="intro"><div><div className="eyebrow"><span/> ОБЗОР РЫНКА</div><h1>{me?'Привет, '+me.name.split(' ')[0]:'Маркет подарков'}</h1><p>Ищите настоящие Telegram Gifts и сравнивайте цены в GRAM.</p></div><button className="primary" onClick={()=>change('Сканер')}><ScanLine size={17}/> Найти подарок <ArrowRight size={16}/></button></div>
     {isDemo&&<div className="demo-note"><FlaskConical size={17}/><span><strong>Подарки из Telegram.</strong> Цены, сделки и график в демо синтетические.</span><button onClick={()=>change('Профиль')}>О GOAT PRO <ArrowUpRight size={14}/></button></div>}
     <div className="metrics">
      <div className="metric"><div><span className="metric-icon"><Radio size={18}/></span><span>Возможности</span></div><strong>{source.length}</strong><small>{isDemo?'Примеры в демо':'Совпадения с вашими фильтрами'}</small></div>
@@ -197,11 +216,11 @@ function App(){
       {markets.map((m,i)=><div className="market-row" key={m.component}><span className={'market-icon market-'+i}>{i===0?<Gem size={19}/>:<Activity size={18}/>}</span><div><strong>{m.component}</strong><small>{m.checked_at?'Проверено '+fmtDate(m.checked_at):'Маркетплейс Telegram Gifts'}</small></div><span className={'status '+(m.status==='online'?'online':'')}>{statusNames[m.status]??m.status}</span></div>)}
       <div className="market-foot"><ShieldCheck size={16}/> Статус показывает доступ терминала к данным.</div>
     </section></div>
-    <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры сигналов':'Последние сигналы'}</h2><p>{isDemo?'Три стратегии на синтетических данных':'Расчётные торговые возможности'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все сигналы <ArrowRight size={16}/></button></div>{signalGrid(display.slice(0,3))}</section>
+    <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Настоящие карточки, учебные цены в GRAM':'Расчётные торговые возможности'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
    </>}
    {page==='Сканер'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> РЫНОЧНЫЕ ВОЗМОЖНОСТИ</div><h1>Сканер</h1><p>{isDemo?'Примеры расчёта на синтетических данных.':'Сигналы по вашему капиталу и фильтрам.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Торговые фильтры</button></div>
-    <div className="panel filters"><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
+    <div className="intro"><div><div className="eyebrow"><span/> КАТАЛОГ ПОДАРКОВ</div><h1>Поиск подарков</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':'Актуальные предложения Portals по вашим фильтрам.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Фильтры</button></div>
+    <div className="panel filters"><Field label="Поиск подарка"><div className="search-box"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Название, номер, модель…"/><>{search&&<button type="button" aria-label="Очистить поиск" onClick={()=>setSearch('')}><X size={15}/></button>}</></div></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
     <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Все</option><option>Portals</option><option>MRKT</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}
    </>}
@@ -228,9 +247,11 @@ function App(){
     </div>
     {me&&prefs&&<div className="panel list-panel"><div className="panel-head"><h2>Фильтры и уведомления</h2><button className="ghost" onClick={()=>setShowPrefs(!showPrefs)}><Settings2 size={16}/>{showPrefs?'Свернуть':'Настроить'}</button></div>
     {showPrefs&&<form className="settings-form" onSubmit={saveSettings}>
-      {([['capital','Капитал, TON'],['roi','Минимальный ROI, %'],['max_cost','Макс. себестоимость, TON'],['min_profit','Мин. прибыль, TON'],['liquidity','Мин. число продаж'],['max_age_seconds','Макс. возраст, сек.'],['frequency_minutes','Интервал сообщений, мин.'],['quiet_start','Тишина с часа UTC'],['quiet_end','Тишина до часа UTC']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
-      {([['collections','Коллекции через запятую'],['markets','Площадки · Portals, MRKT'],['strategies','Стратегии · floor, cross, instant']] as const).map(([key,label])=><Field key={key} label={label}><input name={key} defaultValue={prefs[key].join(', ')}/></Field>)}
+      {([['capital','Мой бюджет, TON'],['roi','Минимальная доходность, %'],['max_cost','Максимальная цена, TON']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
       {([['signals','Торговые уведомления'],['reminders','Напоминания о подписке'],['marketing','Согласие на рассылки']] as const).map(([key,label])=><label className="check" key={key}><input type="checkbox" name={key} defaultChecked={prefs[key]}/>{label}</label>)}
+      <button type="button" className="ghost" onClick={()=>setAdvancedPrefs(!advancedPrefs)}>{advancedPrefs?'Скрыть дополнительные':'Дополнительные настройки'}</button>
+      {advancedPrefs&&<>{([['min_profit','Минимальная прибыль, TON'],['liquidity','Минимум продаж'],['frequency_minutes','Интервал уведомлений, мин.']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
+      {([['collections','Только коллекции'],['markets','Площадки'],['strategies','Стратегии']] as const).map(([key,label])=><Field key={key} label={label}><input name={key} defaultValue={prefs[key].join(', ')}/></Field>)}</>}
       <button className="primary" disabled={busy}>Сохранить</button></form>}</div>}
     {me&&<div className="panel list-panel"><h2>История платежей</h2>{me.payments.length?me.payments.map(o=><div className="table-row" key={String(o.id)}><span>{fmtDate(o.created_at)}</span><span>{o.status}</span><strong>{o.amount} ⭐</strong></div>):<p>Платежей пока нет.</p>}
     <button className="ghost danger" onClick={()=>{if(window.confirm('Удалить профиль, портфель, настройки и переписку? Финансовые записи сохранятся.'))void run(async()=>{await api('/me',{method:'DELETE'});setMe(undefined);setItems([]);setLive([]);setToast('Профиль удалён')})}}>Удалить персональные данные</button></div>}
@@ -257,7 +278,8 @@ function App(){
     {legal&&<dl>{Object.entries(legal).map(([k,v])=><div className="legal-row" key={k}><dt>{({owner:'Оператор',terms:'Правила',privacy:'Конфиденциальность',risk:'Рыночные риски'} as Record<string,string>)[k]}</dt><dd>{v}</dd></div>)}</dl>}
   </section></div>}
   {toast&&<div className="toast" role="status">{toast}<button className="icon-button" aria-label="Закрыть" onClick={()=>setToast('')}><X size={15}/></button></div>}
- </div></MotionConfig>
+ </div></div></MotionConfig>
 }
 const adminLabels:Record<string,string>={users:'Пользователи',new_today:'Новые сегодня',new_week:'Новые за неделю',new_month:'Новые за месяц',active_today:'Активные сегодня',active_week:'Активные за неделю',blocked:'Заблокированные',subscribed:'Подписчики',paid_subscribers:'Платные',free_subscribers:'Бесплатные',expired:'Истёкшие',free_grants:'Бесплатные выдачи',conversion:'Конверсия, %',sales:'Покупки',gross:'Валовая выручка, Stars',average:'Средний чек, Stars',buyers:'Покупатели',first_purchases:'Первые покупки',renewals:'Продления',refunds:'Возвращено, Stars',refund_count:'Возвраты',net:'После возвратов, Stars',pending:'Ожидают одобрения'}
 createRoot(document.getElementById('root')!).render(<App/>)
+

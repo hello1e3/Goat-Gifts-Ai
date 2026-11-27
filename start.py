@@ -61,7 +61,7 @@ async def lifespan(app):
                     ("support", "Поддержка"), ("paysupport", "Поддержка платежей"), ("terms", "Правила сервиса"))])
                 if config.app_url.startswith("https://"):
                     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
-                        text="Терминал", web_app=WebAppInfo(url=config.app_url)))
+                        text="GOAT NFT", web_app=WebAppInfo(url=config.app_url)))
                 # Bothost injects its own WEBHOOK_URL even when the application
                 # has not been configured for webhook delivery.  Only opt in
                 # when the matching secret is explicitly supplied; otherwise

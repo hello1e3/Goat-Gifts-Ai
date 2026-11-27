@@ -15,7 +15,7 @@ from goat.billing import history, statistics
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, calculate
 from goat.gift_preview import GiftPreviews
-from goat.terminal import CloseInput, PortfolioInput, Preferences, add_item, close_item, demo, portfolios, save_prefs, signals
+from goat.terminal import CloseInput, PortfolioInput, Preferences, add_item, catalog, close_item, demo, portfolios, save_prefs, signals
 
 
 def create_api(db, config, lifespan):
@@ -142,6 +142,12 @@ def create_api(db, config, lifespan):
             access = await require_access(conn, uid)
             return await signals(conn, Preferences.model_validate(access["prefs"]), history=past)
 
+    @app.get("/api/catalog")
+    async def gifts_catalog(uid: User, q: str = ""):
+        async with db.transaction() as conn:
+            await require_access(conn, uid)
+            return await catalog(conn, q)
+
     @app.post("/api/signals/{id_}/verify")
     async def verify(uid: User, id_: str):
         async with db.transaction() as conn:
@@ -234,3 +240,4 @@ def create_api(db, config, lifespan):
             return FileResponse(static / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
+

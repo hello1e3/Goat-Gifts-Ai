@@ -67,6 +67,32 @@ async def signals(conn, prefs: Preferences, history=False):
         collections=prefs.collections)
 
 
+async def catalog(conn, search=""):
+    query_text = search.strip()[:80]
+    entries = await rows(conn, """
+        select l.market,l.external_id,l.price,l.currency,l.url,l.transferable_at,l.observed_at,
+               g.id,g.collection,g.number,g.title,g.model,g.backdrop,g.symbol,g.rarity,g.image
+        from market_listings l join gifts g on g.id=l.gift_id
+        where l.active and l.observed_at>now()-interval '3 minutes'
+          and (:search='' or g.title ilike '%'||:search||'%' or g.collection ilike '%'||:search||'%'
+               or g.model ilike '%'||:search||'%' or g.backdrop ilike '%'||:search||'%'
+               or g.symbol ilike '%'||:search||'%' or cast(g.number as text)=:search)
+        order by l.observed_at desc,l.price asc limit 120
+    """, search=query_text)
+    return [{
+        "id": f"catalog:{row['market']}:{row['external_id']}", "strategy": "floor", "state": "listed",
+        "observed_at": row["observed_at"], "details": {
+            "id": row["id"], "collection": row["collection"], "number": row["number"],
+            "title": row["title"], "model": row["model"], "backdrop": row["backdrop"],
+            "symbol": row["symbol"], "rarity": row["rarity"], "image": row["image"],
+            "purchase": row["price"], "sale": row["price"], "cost": row["price"],
+            "proceeds": row["price"], "profit": "0", "roi": "0", "currency": row["currency"],
+            "market": row["market"], "exit_market": row["market"], "url": row["url"],
+            "transferable_at": row["transferable_at"], "liquidity": 0, "history": [],
+            "risk": "Цена получена из Portals и может измениться до покупки.",
+        }} for row in entries]
+
+
 def demo():
     dataset = [
         ("snoopdogg-223555", "Snoop Dogg", 223555, "Old School", "Deep Cyan", "Eikthyrnir",
@@ -84,7 +110,7 @@ def demo():
                                      transfer=Decimal(".15")))
         items.append({"id": id_, "strategy": strategy, "state": "demo", "observed_at": now, "details": {
             "title": name, "collection": name, "model": model, "number": number, "backdrop": backdrop,
-            "symbol": symbol, "currency": "TON", "purchase": buy, "sale": sale, "market": market,
+            "symbol": symbol, "currency": "GRAM", "purchase": buy, "sale": sale, "market": market,
             "exit_market": ("Portals" if market == "MRKT" else market), "liquidity": liquidity,
             "telegram_slug": id_, "risk": "Изображение и атрибуты из Telegram. Цены и сделки учебные.",
             "history": [{"date": now-timedelta(days=i), "price": sale + Decimal(i % 4 - 2) / 4}
@@ -152,3 +178,4 @@ async def save_prefs(conn, uid, prefs):
         insert into user_settings(user_id,prefs) values(:uid,cast(:prefs as jsonb))
         on conflict(user_id) do update set prefs=excluded.prefs
     """, uid=uid, prefs=prefs.model_dump_json())
+

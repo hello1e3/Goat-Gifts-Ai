@@ -130,8 +130,15 @@ class Portals:
                        date(raw.get("unlocks_at")), floor or None)
 
     async def listings(self):
-        result = await self.get("/nfts/search", status="listed", limit=40, sort_by="listed_at desc")
-        return [self.listing(raw) for raw in result["results"] if raw["status"] == "listed"]
+        output = []
+        for offset in (0, 40, 80):
+            result = await self.get("/nfts/search", status="listed", limit=40, offset=offset,
+                                    sort_by="listed_at desc")
+            page = [self.listing(raw) for raw in result["results"] if raw["status"] == "listed"]
+            output.extend(page)
+            if len(result["results"]) < 40:
+                break
+        return output
 
     async def sales(self):
         result = await self.get("/market/actions/", action_types="purchase", limit=20)
@@ -351,3 +358,4 @@ async def requested_checks(db, adapters):
                             s=status, key=request["key"])
             await query(conn, "update system_settings set value=jsonb_build_object('status',cast(:s as text),'checked_at',now()) where key=:key",
                         s=status, key=request["key"])
+

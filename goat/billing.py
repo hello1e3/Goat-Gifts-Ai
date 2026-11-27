@@ -89,6 +89,50 @@ async def approve(conn, order_id, actor, allowed):
     return result
 
 
+async def card_settings(conn):
+    return await scalar(conn, "select value from system_settings where key='card_payment'")
+
+
+async def card_request(conn, uid):
+    user = await one(conn, "select blocked,erased from users where id=:uid for update", uid=uid)
+    if user is None or user["blocked"] or user["erased"]:
+        raise ValueError("Покупка недоступна")
+    settings = await card_settings(conn)
+    if not settings or not settings.get("enabled") or not settings.get("amount"):
+        raise ValueError("Оплата переводом сейчас недоступна")
+    existing = await one(conn, """
+        select * from manual_payments where user_id=:uid and status='pending'
+        order by created_at desc limit 1
+    """, uid=uid)
+    if existing:
+        return existing
+    return await one(conn, """
+        insert into manual_payments(id,user_id,amount,currency)
+        values(:id,:uid,:amount,'RUB') returning *
+    """, id=uuid4(), uid=uid, amount=settings["amount"])
+
+
+async def review_card(conn, request_id, actor, allowed):
+    request = await one(conn, """
+        update manual_payments set status=:status,reviewed_at=now(),actor=:actor
+        where id=:id and status='pending' returning *
+    """, id=request_id, actor=actor, status="approved" if allowed else "rejected")
+    if not request:
+        raise ValueError("Заявка уже обработана")
+    await audit(conn, actor, "card_approve" if allowed else "card_reject", request_id)
+    if allowed:
+        entry = await grant(conn, request["user_id"], 30 * DAY, "paid", actor=actor,
+                            reason=f"Перевод на карту · заявка {request_id}")
+        await query(conn, "update manual_payments set grant_id=:grant where id=:id",
+                    grant=entry["id"], id=request_id)
+        await enqueue(conn, request["user_id"], f"card-approved:{request_id}",
+                      text="💎 Перевод подтверждён. GOAT PRO активирован на 30 дней.")
+    else:
+        await enqueue(conn, request["user_id"], f"card-rejected:{request_id}",
+                      text="Перевод не подтверждён. Проверьте реквизиты или обратитесь в /support.")
+    return request
+
+
 async def checkout(conn, oid, uid, amount, currency):
     return bool(await scalar(conn, """
         update orders o set checkout_at=now() from users u
@@ -221,3 +265,4 @@ async def history(conn, uid):
         from orders o left join payments p on p.order_id=o.id where o.user_id=:uid
         order by o.created_at desc limit 100
     """, uid=uid)
+
