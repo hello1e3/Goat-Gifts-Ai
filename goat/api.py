@@ -1,10 +1,13 @@
 import csv
+from dataclasses import asdict
 from datetime import UTC, datetime
 import io
 import json
 from pathlib import Path
 import time
 from typing import Annotated
+
+import httpx
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -15,6 +18,7 @@ from goat.billing import history, statistics
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, calculate
 from goat.gift_preview import GiftPreviews
+from goat.market import Portals
 from goat.terminal import CloseInput, PortfolioInput, Preferences, add_item, catalog, close_item, demo, portfolios, save_prefs, signals
 
 
@@ -148,7 +152,25 @@ def create_api(db, config, lifespan):
     async def gifts_catalog(uid: User, q: str = ""):
         async with db.transaction() as conn:
             await require_access(conn, uid)
-            return await catalog(conn, q)
+            cached = await catalog(conn, q)
+        if q.strip() and config.portals_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+                    listings = await Portals(client, config.portals_api_key).search(q)
+                return [{
+                    "id": f"catalog:{item.market}:{item.external_id}", "strategy": "floor",
+                    "state": "listed", "observed_at": datetime.now(UTC), "details": {
+                        **asdict(item.gift), "purchase": item.price, "sale": item.floor or item.price,
+                        "cost": item.price, "proceeds": item.floor or item.price,
+                        "profit": (item.floor - item.price) if item.floor else 0,
+                        "roi": ((item.floor - item.price) * 100 / item.price) if item.floor else 0,
+                        "currency": item.currency, "market": item.market, "exit_market": item.market,
+                        "url": item.url, "transferable_at": item.transferable_at, "liquidity": 0,
+                        "history": [], "risk": "Цена и floor получены напрямую из Portals и могут измениться.",
+                    }} for item in listings]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError):
+                pass
+        return cached
 
     @app.post("/api/signals/{id_}/verify")
     async def verify(uid: User, id_: str):
