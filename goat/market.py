@@ -242,8 +242,8 @@ class Portals:
 
     async def get_listings(self, ids):
         found = {}
-        for offset in range(0,len(ids),100):
-            result = await self.get('/nfts/search', ids=','.join(ids[offset:offset+100]),
+        for offset in range(0,len(ids),50):
+            result = await self.get('/nfts/search', ids=','.join(ids[offset:offset+50]),
                                     status='listed',limit=100,offset=0)
             for raw in result.get('results',[]):
                 if raw.get('status') == 'listed':

@@ -225,7 +225,7 @@ function App(){
   if(signal.state!=='demo')void run(()=>refreshGift(signal))
  }
  function signalGrid(entries:Signal[]){
-  return loading?<div className="signal-grid">{[1,2,3].map(i=><div className="skeleton" key={i}/>)}</div>:
+  return (loading||searching)?<div className="signal-grid">{[1,2,3].map(i=><div className="skeleton" key={i}/>)}</div>:
    entries.length?<div className="signal-grid">{entries.map(signal=><SignalCard key={signal.id} signal={signal} onClick={()=>openGift(signal)}/>)}</div>:
     <div className="empty"><ScanLine size={25}/><strong>Подходящих сигналов пока нет</strong><span>Совпадений с заданными фильтрами сейчас нет. Нажмите «Найти» для обновления.</span></div>
  }

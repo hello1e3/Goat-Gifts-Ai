@@ -154,6 +154,6 @@ async def test_portals_batch_verification_splits_requests_without_per_lot_calls(
             return {'results':[]}
         adapter.get=get
         assert await adapter.get_listings([str(i) for i in range(205)])=={}
-        assert [len(c['ids'].split(',')) for c in calls]==[100,100,5]
+        assert [len(c['ids'].split(',')) for c in calls]==[50,50,50,50,5]
         assert all(c['status']=='listed' for c in calls)
 

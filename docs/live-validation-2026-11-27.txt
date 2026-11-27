@@ -1,0 +1,22 @@
+Live Telegram / BotHost validation, 27 November 2026 (Moscow time)
+Deployed code: 81309d1b458e6060c366a74653a99626668323cc
+
+Observed before fix: last scan 251.46 seconds, 397 fresh listings, 114 collections. Existing signals expire after 180 seconds. Profit recheck worked on Jolly Chimp with 12 model comparables, but search in opportunities did not fetch new results and shared busy state disabled unrelated controls.
+
+Changes: server-side search and filters before pagination; strict budget/ROI/profit/collection/strategy/market criteria in catalog; no unrelated watch-list fallback. Exact #number search; low/repeated/palindrome/round serial filters. A separate persisted Portals cursor reads low serials; special-number valuation may use an ordinary model baseline with no invented premium. Batch database writes and multi-ID availability checks replace per-listing round trips. Search has independent loading state and requests time out after 25 seconds.
+
+Live checks after BotHost rebuild: production asset index-CZZ2_d9j.js. Enter query #71347 returned only Jack-in-the-Box #71347. Combining that query with rare-number filter returned no matches. Temporarily setting budget 10 returned 29 eligible catalog items across two pages; all displayed costs were below 10. Clicking Find with Pool returned only Pool Float #20907. Original budget 200 restored, ROI 5 unchanged, notification settings unchanged.
+
+Live diagnostics after fix: 18.26 seconds, 185 analyzed listings in a cycle, 3 profitable, 1296 fresh listings, 124 collections, 5280 unique stored listings. These are observations at 21:37, not fixed performance guarantees or complete market coverage. Portals search for ascending serials and batched verification returned HTTP 200.
+
+Validation: 52 pytest tests passed using isolated local PostgreSQL, TypeScript check and Vite build passed. No purchases or withdrawals performed. Valuations based on asks are estimates; actual sale history remains unavailable with this WebApp integration.
+
+Research read:
+https://gemwallet.com/ru/learn/podarki-telegram-rukovodstvo-dlya-nachinayushchih-po-nft-na-ton/
+https://news.dropstab.com/ru/research/what-are-telegram-gifts
+https://vc.ru/telegram/3166715-nft-podarki-v-telegram
+Primary contracts checked:
+https://docs.portals.tg/developers/api/get-nfts-search
+https://docs.portals.tg/marketplace/fees
+Pricing design: model/background/symbol/serial and liquidity must be distinguished. Asking prices are not completed sales; collection floor is not a trait-specific resale price. Standard sale fee 2%, special collection exceptions may differ. Serial rarity is not a justified fixed multiplier.
+
