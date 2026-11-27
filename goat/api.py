@@ -99,8 +99,9 @@ def create_api(db, config, lifespan):
         async with db.transaction() as conn:
             status = {row["component"]: row for row in await rows(conn, "select * from system_health")}
         output = []
-        portals_fallback = ("license_required" if not config.portals_data_licensed else
-                            "key_required" if not config.portals_api_key else "initializing")
+        portals_fallback = ("key_required" if not config.portals_api_key else
+                            "license_required" if not config.portals_api_key.startswith("tma ")
+                            and not config.portals_data_licensed else "initializing")
         mrkt_fallback = "key_required" if not config.mrkt_api_key else "initializing"
         for name, fallback in (("Portals", portals_fallback), ("MRKT", mrkt_fallback)):
             current = status.get(name, {"component": name, "status": fallback})
