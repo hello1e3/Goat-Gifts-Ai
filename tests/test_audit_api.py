@@ -102,3 +102,26 @@ async def test_database_budget_filters_include_all_affordable_prices(db):
         limited=await signals(conn,Preferences(capital=200,max_cost=50,limit_per_gift=True))
         assert {row['details']['purchase'] for row in limited}=={'5','30'}
 
+
+async def test_webapp_scan_reaches_profitable_tab_without_sales(db):
+    from goat.market import scan
+    from test_valuation import listing
+    target=listing('5')
+    peers=[replace(target,external_id=str(i),price=Decimal(price),
+        gift=replace(target.gift,id=f'locket-{155+i}',number=155+i,symbol=f'Symbol {i}'))
+        for i,price in enumerate(('8','9','10','11'))]
+    class WebApp:
+        name='Portals'
+        webapp=True
+        async def listings(self): return [target,*peers]
+        async def sales(self): return []
+        async def offer(self,item): return None
+        async def get_listing(self,id_): return next(x for x in [target,*peers] if x.external_id==id_)
+    await scan(db,[WebApp()],{})
+    async with db.transaction() as conn:
+        found=await signals(conn,Preferences(capital=20))
+        assert len(found)==1
+        assert found[0]['listing_id']==target.external_id
+        assert found[0]['details']['evidence']=='asks'
+        assert Decimal(found[0]['details']['profit'])>0
+

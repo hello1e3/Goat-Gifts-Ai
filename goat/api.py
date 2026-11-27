@@ -232,6 +232,12 @@ def create_api(db, config, lifespan):
         pool = [Listing(row['market'],row['external_id'],
                 Gift(**{k:row[k] for k in Gift.__dataclass_fields__}),row['price'],row['currency'],
                 row['url'],row['transferable_at'],row['floor']) for row in peers]
+        if isinstance(adapter,Portals):
+            try:
+                extra = await asyncio.wait_for(adapter.comparables(listing),timeout=12)
+                pool = list({item.external_id:item for item in [*pool,*extra]}.values())
+            except (httpx.HTTPError,TimeoutError,ValueError,KeyError,TypeError):
+                pass
         async with db.transaction() as conn:
             sold = await rows(conn,"""select g.*,s.market,s.external_id,s.price,s.currency,s.sold_at
                 from market_sales s join gifts g on g.id=s.gift_id

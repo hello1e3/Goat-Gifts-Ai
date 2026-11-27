@@ -38,11 +38,19 @@ class FairValueEngine:
     def __init__(self, listings=(), sales=(), now=None):
         self.now = now or datetime.now(UTC)
         self.asks, self.sales = defaultdict(list), defaultdict(list)
+        self.model_backdrop = defaultdict(list)
         for item in listings:
             self.asks[(item.market, item.currency, item.gift.comparable)].append(item)
+            self.model_backdrop[self.similar_key(item)].append(item)
         for item in sales:
             if self.now - timedelta(days=30) <= item.sold_at <= self.now:
                 self.sales[(item.market, item.currency, item.gift.comparable)].append(item)
+
+    @staticmethod
+    def similar_key(item):
+        g = item.gift
+        return (item.market,item.currency,g.collection.casefold(),g.model.casefold(),
+                g.backdrop.casefold(),g.comparable[-1])
 
     def evaluate(self, listing):
         key = (listing.market, listing.currency, listing.gift.comparable)
@@ -56,18 +64,30 @@ class FairValueEngine:
             sold.append((sale.price, weight))
         sold = clean(sold)
         offered = clean([(a.price, Decimal(1)) for a in asks])
+        lowest_ask = min((a.price for a in asks),default=None)
+        match = 'exact'
+        if len(offered) < 3:
+            similar = {a.external_id:a for a in self.model_backdrop[self.similar_key(listing)]
+                       if a.external_id != listing.external_id and a.gift.id != listing.gift.id}
+            pooled = clean([(a.price,Decimal(1)) for a in similar.values()])
+            if len(pooled) >= 3:
+                offered = pooled
+                lowest_ask = min(a.price for a in similar.values())
+                match = 'model_backdrop'
         result = dict(fair_value=None, conservative_sale=None, optimistic_sale=None,
                       confidence='insufficient', reference_basis='Недостаточно сопоставимых данных',
                       sales_count=len(sold), comparable_asks=len(offered),
-                      liquidity=len(sold), estimated_days_to_sell=None, evidence='none')
+                      liquidity=len(sold), estimated_days_to_sell=None, evidence='none',comparison_match=match)
         if len(sold) >= 3:
             result.update(fair_value=weighted(sold, '.5'), conservative_sale=weighted(sold, '.25'),
                           optimistic_sale=weighted(sold, '.75'), evidence='sales',
                           confidence='medium' if len(sold) < 10 else 'high',
                           reference_basis='Недавние продажи с совпадающими характеристиками')
         elif len(offered) >= 3:
-            result.update(fair_value=weighted(offered, '.5'), conservative_sale=weighted(offered, '.25'),
+            result.update(fair_value=weighted(offered, '.25'), conservative_sale=lowest_ask,
                           optimistic_sale=weighted(offered, '.75'), evidence='asks', confidence='low',
-                          reference_basis='Цены аналогичных объявлений; цена продажи не подтверждена')
+                          reference_basis=('Объявления с той же моделью и фоном; премия символа не оценена'
+                              if match=='model_backdrop' else 'Объявления с совпадающими характеристиками')
+                              + '; предварительный расчёт, цена продажи не подтверждена')
         return result
 

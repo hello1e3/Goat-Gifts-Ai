@@ -87,7 +87,7 @@ async def deliver(bot, conn, entry, app_url):
         if not access or not access["active"] or not access["prefs"].get("signals", True) or not signal:
             return False
         d = signal["details"]
-        text = (f"🔥 ДЕШЁВЫЙ ПОДАРОК НАЙДЕН\n\n"
+        text = (f"🔎 ПОТЕНЦИАЛЬНО ВЫГОДНЫЙ ПОДАРОК\n\n"
                 f"🎁 {d['title']} #{d['number']}\n"
                 f"🎨 {d['model']} · {d['backdrop']} · {d['symbol']}\n\n"
                 f"🛒 Купить: {Decimal(d['purchase']):.2f} {d['currency']}\n"

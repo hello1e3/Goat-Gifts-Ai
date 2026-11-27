@@ -270,9 +270,9 @@ def test_catalog_analysis_uses_real_peer_reference_and_fees():
     fees = dict(buy_fee='0',sell_fee='.025',transfer='0',network='0',conversion='0',extra_sell='0')
     details = listing_analysis(cheap, peers, fees)
     assert details['evidence'] == 'asks' and details['liquidity'] == 0
-    assert details["sale"] == Decimal("9")
-    assert details["sell_commission"] == Decimal(".225")
-    assert details["profit"] == Decimal("3.775")
+    assert details["sale"] == Decimal("8")
+    assert details["sell_commission"] == Decimal(".200")
+    assert details["profit"] == Decimal("2.800")
     assert details["conservative_profit"] > 0
 
 

@@ -78,7 +78,7 @@ function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
  return <button className="signal-card" onClick={onClick}>
   <div className="signal-media"><Art signal={signal}/><span className="strategy">{d.market}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
   <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div><span className="roi">{Number(d.roi)>0?'+':''}{f(d.roi)}%</span></div>
-  <div className="gift-attributes"><span>{d.symbol}</span><span>{strategyNames[signal.strategy]}</span></div>
+  <div className="gift-attributes"><span>{d.symbol}</span><span>{d.evidence==='asks'?'Предварительный расчёт':strategyNames[signal.strategy]}</span></div>
   <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Оценка · {d.confidence==='low'?'по объявлениям':'по продажам'}</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{profitable?'+':''}{f(d.profit)} {d.currency}</b></div></div></div>
  </button>
 }

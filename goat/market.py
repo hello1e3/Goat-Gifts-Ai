@@ -146,6 +146,8 @@ class Portals:
         self.scan_complete = False
         self.api_errors = 0
         self.sales_offset = 0
+        self.collection_ids = {}
+        self.enriched_at = {}
 
     async def get(self, path, **params):
         async with self.lock:
@@ -194,6 +196,8 @@ class Portals:
 
     def listing(self, raw):
         gift = self.gift(raw)
+        if raw.get('collection_id'):
+            self.collection_ids[gift.collection.casefold()] = raw['collection_id']
         # Open the exact Portals listing, not Telegram's read-only collectible
         # page.  The user can review the current price and complete the purchase
         # inside the official Portals mini app.
@@ -222,6 +226,15 @@ class Portals:
                 else:
                     self.scan_offset += len(page)
         return list(output.values())
+
+    async def comparables(self, listing):
+        collection_id = self.collection_ids.get(listing.gift.collection.casefold())
+        if not collection_id:
+            return []
+        result = await self.get('/nfts/search',collection_ids=collection_id,
+            filter_by_models=listing.gift.model,filter_by_backdrops=listing.gift.backdrop,
+            status='listed',sort_by='price asc',limit=100,offset=0)
+        return [self.listing(raw) for raw in result.get('results',[]) if raw.get('status')=='listed']
 
     async def search(self, text, offset=0, limit=60):
         query = text.strip()[:80]
@@ -378,7 +391,7 @@ def candidates(listing, sales, listings, offer, fees, now, engine=None):
         return []
     details = listing_analysis(listing, listings, fees[listing.market], sales=sales, engine=engine)
     result = []
-    if (details['evidence'] == 'sales' and details['profit'] is not None
+    if (details['evidence'] in ('sales','asks') and details['profit'] is not None
             and details['profit'] > 0 and details['conservative_profit'] > 0):
         result.append(('floor', 'potential', details))
     if offer and (not listing.transferable_at or listing.transferable_at <= now):
@@ -433,6 +446,17 @@ async def scan(db, adapters, status):
                 async with db.transaction() as conn:
                     await health(conn, adapter.name, "unavailable")
                 continue
+            if isinstance(adapter,Portals) and listed:
+                # Fetch a comparable group explicitly instead of relying on
+                # accidental matches in a small mixed page. Rotate groups.
+                key = lambda item: (item.gift.collection,item.gift.model,item.gift.backdrop)
+                target = min(listed,key=lambda item:adapter.enriched_at.get(key(item),0))
+                try:
+                    extra = await adapter.comparables(target)
+                    adapter.enriched_at[key(target)] = datetime.now(UTC).timestamp()
+                    listed = list({item.external_id:item for item in [*listed,*extra]}.values())
+                except (httpx.HTTPError,ValueError,KeyError,TypeError,ArithmeticError):
+                    pass  # Keep the available listing page if enrichment fails.
             try:
                 sold = await adapter.sales()
                 sales_status = 'not_supported' if getattr(adapter,'webapp',False) else 'online'

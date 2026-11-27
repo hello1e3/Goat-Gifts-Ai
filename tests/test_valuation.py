@@ -77,3 +77,26 @@ async def test_portals_cursor_advances_by_actual_page_size_and_deduplicates():
         assert 20 in calls and 40 in calls and 60 in calls
         assert adapter.scan_offset==0 and adapter.scan_complete
 
+
+def test_webapp_without_sales_produces_preliminary_opportunity():
+    item=listing('5')
+    peers=[replace(item,external_id=str(i),price=Decimal(price),
+            gift=replace(item.gift,id=f'locket-{155+i}',number=155+i,symbol=f'Symbol {i}'))
+            for i,price in enumerate(('8','9','10','11'))]
+    found=candidates(item,[],peers,None,{'Portals':FEES},datetime.now(UTC))
+    assert len(found)==1
+    d=found[0][2]
+    assert d['evidence']=='asks' and d['confidence']=='low'
+    assert d['comparison_match']=='model_backdrop' and d['liquidity']==0
+    assert d['conservative_sale']==8 and d['conservative_profit']>0
+
+
+def test_cheaper_competitor_prevents_false_positive_even_when_outlier():
+    item=listing('5')
+    peers=[replace(item,external_id=str(i),price=Decimal(price),
+            gift=replace(item.gift,id=f'locket-{155+i}',number=155+i))
+            for i,price in enumerate(('1','10','10','10','10','10'))]
+    d=listing_analysis(item,peers,FEES)
+    assert d['conservative_sale']==1
+    assert candidates(item,[],peers,None,{'Portals':FEES},datetime.now(UTC))==[]
+
