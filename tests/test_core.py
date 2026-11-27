@@ -236,6 +236,22 @@ def test_strategies_comparability_and_restrictions():
     assert {r[0] for r in candidates(locked, history, [alternative], Offer("1", Decimal(12)), fees, now)} == {"floor"}
 
 
+def test_live_floor_discount_produces_real_calculated_profit_without_sales():
+    now = datetime.now(UTC)
+    gift = Gift("cheap-1", "Cheap", 1, "Cheap", "Model", "Back", "Sym", None, None)
+    listing = Listing("Portals", "listing-1", gift, Decimal("8"), "GRAM", None, None,
+                      floor=Decimal("10"))
+    fees = {"Portals": dict(buy_fee=".01", sell_fee=".02", transfer="0", network="0",
+                             conversion="0", extra_sell="0")}
+    result = candidates(listing, [], [listing], None, fees, now)
+    assert len(result) == 1 and result[0][0] == "floor"
+    details = result[0][2]
+    assert details["purchase"] == Decimal("8")
+    assert details["sale"] == Decimal("10")
+    assert details["profit"] == Decimal("1.72")
+    assert details["roi"] > 20
+
+
 async def test_mrkt_contract_pagination_and_nanoton_price():
     calls = []
 
