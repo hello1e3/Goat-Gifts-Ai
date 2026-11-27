@@ -6,6 +6,11 @@ from goat.db import one, query, rows, scalar
 
 PLAN = "GOAT PRO"
 DAY = 86400
+PLAN_TERMS = {
+    30: (PLAN, 1),
+    180: ("GOAT PRO 180", 5),
+    365: ("GOAT PRO 365", 9),
+}
 
 
 async def init_plan(conn, config):
@@ -13,6 +18,15 @@ async def init_plan(conn, config):
         insert into subscription_plans(id,description,price,approval)
         values(:id,'30 дней доступа к GOAT Gifts AI',:price,:approval) on conflict do nothing
     """, id=PLAN, price=config.default_subscription_price_xtr, approval=config.purchase_approval_required)
+    base = config.default_subscription_price_xtr
+    for days, (plan_id, multiplier) in PLAN_TERMS.items():
+        if days == 30:
+            continue
+        await query(conn, """
+            insert into subscription_plans(id,description,price,approval)
+            values(:id,:description,:price,:approval) on conflict do nothing
+        """, id=plan_id, description=f"{days} дней доступа к GOAT Gifts AI",
+             price=base * multiplier if base else None, approval=config.purchase_approval_required)
 
 
 async def promo_for_update(conn, uid, code):
@@ -35,17 +49,21 @@ async def promo_for_update(conn, uid, code):
     return promo
 
 
-async def order(conn, uid, admins, code=None):
+async def order(conn, uid, admins, code=None, term_days=30):
     user = await one(conn, "select blocked,erased from users where id=:uid for update", uid=uid)
     if user is None or user["blocked"] or user["erased"]:
         raise ValueError("Покупка недоступна")
+    if term_days not in PLAN_TERMS:
+        raise ValueError("Срок подписки недоступен")
+    plan_id, _ = PLAN_TERMS[term_days]
     existing = await one(conn, """
         select * from orders where user_id=:uid and status in ('pending_approval','awaiting_payment')
+          and plan_id=:plan
           and (expires_at>now() or checkout_at is not null) order by created_at desc limit 1
-    """, uid=uid)
+    """, uid=uid, plan=plan_id)
     if existing:
         return existing
-    plan = await one(conn, "select * from subscription_plans where id=:id", id=PLAN)
+    plan = await one(conn, "select * from subscription_plans where id=:id", id=plan_id)
     if not plan or not plan["enabled"] or not plan["price"]:
         raise ValueError("Продажи сейчас закрыты")
     price = plan["price"]
@@ -60,9 +78,10 @@ async def order(conn, uid, admins, code=None):
         price = max(1, price - cut)
     status = "pending_approval" if plan["approval"] else "awaiting_payment"
     result = await one(conn, """
-        insert into orders(id,user_id,plan_id,description,amount,status,promo)
-        values(:id,:uid,:plan,:description,:price,:status,:promo) returning *
-    """, id=uuid4(), uid=uid, plan=PLAN, description=plan["description"], price=price, status=status,
+        insert into orders(id,user_id,plan_id,description,amount,status,promo,duration_seconds)
+        values(:id,:uid,:plan,:description,:price,:status,:promo,:duration) returning *
+    """, id=uuid4(), uid=uid, plan=plan_id, description=plan["description"], price=price, status=status,
+         duration=term_days * DAY,
          promo=promo["code"] if promo else None)
     if promo:
         await query(conn, "insert into promo_redemptions(code,user_id,order_id) values(:c,:u,:o)",
@@ -93,7 +112,7 @@ async def card_settings(conn):
     return await scalar(conn, "select value from system_settings where key='card_payment'")
 
 
-async def card_request(conn, uid):
+async def card_request(conn, uid, amount=None, duration_seconds=30 * DAY):
     user = await one(conn, "select blocked,erased from users where id=:uid for update", uid=uid)
     if user is None or user["blocked"] or user["erased"]:
         raise ValueError("Покупка недоступна")
@@ -107,9 +126,9 @@ async def card_request(conn, uid):
     if existing:
         return existing
     return await one(conn, """
-        insert into manual_payments(id,user_id,amount,currency)
-        values(:id,:uid,:amount,'RUB') returning *
-    """, id=uuid4(), uid=uid, amount=settings["amount"])
+        insert into manual_payments(id,user_id,amount,currency,duration_seconds)
+        values(:id,:uid,:amount,'RUB',:duration) returning *
+    """, id=uuid4(), uid=uid, amount=amount or settings["amount"], duration=duration_seconds)
 
 
 async def review_card(conn, request_id, actor, allowed):
@@ -121,12 +140,12 @@ async def review_card(conn, request_id, actor, allowed):
         raise ValueError("Заявка уже обработана")
     await audit(conn, actor, "card_approve" if allowed else "card_reject", request_id)
     if allowed:
-        entry = await grant(conn, request["user_id"], 30 * DAY, "paid", actor=actor,
+        entry = await grant(conn, request["user_id"], request["duration_seconds"], "paid", actor=actor,
                             reason=f"Перевод на карту · заявка {request_id}")
         await query(conn, "update manual_payments set grant_id=:grant where id=:id",
                     grant=entry["id"], id=request_id)
         await enqueue(conn, request["user_id"], f"card-approved:{request_id}",
-                      text="💎 Перевод подтверждён. GOAT PRO активирован на 30 дней.")
+                      text=f"Перевод подтверждён. GOAT PRO активирован на {request['duration_seconds'] // DAY} дней.")
     else:
         await enqueue(conn, request["user_id"], f"card-rejected:{request_id}",
                       text="Перевод не подтверждён. Проверьте реквизиты или обратитесь в /support.")
@@ -165,11 +184,12 @@ async def payment(conn, oid, uid, amount, currency, charge, paid_at, admins):
         return True
     await grant(conn, uid, purchase["duration_seconds"], "paid", order=oid)
     await query(conn, "update orders set status='activated' where id=:id", id=oid)
-    await enqueue(conn, uid, f"payment:{oid}", text="💎 GOAT PRO активирован на 30 дней.")
+    days = purchase["duration_seconds"] // DAY
+    await enqueue(conn, uid, f"payment:{oid}", text=f"GOAT PRO активирован на {days} дней.")
     totals = await sales(conn, 1)
     await notify_admins(conn, admins, f"sale:{oid}", text=(
         f"💎 НОВАЯ ПРОДАЖА\n👤 {user['username'] or user['name']}\n🆔 {uid}\n"
-        f"📦 GOAT PRO · 30 дней\n💰 Оплачено {amount} Stars\n"
+        f"GOAT PRO · {days} дней\nОплачено {amount} Stars\n"
         f"📊 Продаж сегодня {totals['sales']}\n💵 Выручка сегодня {totals['net']} Stars"))
     return True
 
