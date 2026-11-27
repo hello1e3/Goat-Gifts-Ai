@@ -1,13 +1,22 @@
-import {useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode} from 'react'
+import {lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode} from 'react'
 import {createRoot} from 'react-dom/client'
 import {motion, MotionConfig} from 'framer-motion'
-import {AreaSeries, ColorType, createChart, type UTCTimestamp} from 'lightweight-charts'
 import {Activity, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Bell, ChartNoAxesCombined, ChevronDown, CircleHelp, FlaskConical, Gem, Globe2, LayoutDashboard, Radio, ScanLine, Search, Settings2, ShieldCheck, UserRound, Wallet, X} from 'lucide-react'
 import './style.css'
 import snoop from './art/snoopdogg-223555.jpg'
 import pepe from './art/plushpepe-1.jpg'
 import cap from './art/durovscap-1.jpg'
-import goatMark from './art/goat-mark.png'
+import goatMark from './art/goat-avatar.webp'
+const PriceChart=lazy(()=>import('./PriceChart'))
+
+// Local clock, re-evaluated on resume so a sleeping WebView never keeps yesterday's theme.
+function updateTimeTheme(){
+ const hour=new Date().getHours()
+ const theme=hour>=7&&hour<18?'day':hour>=18&&hour<22?'evening':'night'
+ document.documentElement.dataset.theme=theme
+ document.querySelector('meta[name="theme-color"]')?.setAttribute('content',theme==='day'?'#ffffff':theme==='evening'?'#19212c':'#111315')
+}
+updateTimeTheme()
 
 const demoArt:Record<string,string>={'snoopdogg-223555':snoop,'plushpepe-1':pepe,'durovscap-1':cap}
 
@@ -39,22 +48,7 @@ async function api<T>(path:string, options:RequestInit={}):Promise<T> {
  return res.status===204?undefined as T:res.json()
 }
 const post = (data?:unknown):RequestInit => ({method:'POST',body:data===undefined?undefined:JSON.stringify(data)})
-function Chart({points,decor=false}:{points:Point[];decor?:boolean}){
- const ref=useRef<HTMLDivElement>(null)
- useEffect(()=>{
-  if(!ref.current||!points.length)return
-  const chart=createChart(ref.current,{autoSize:true,layout:{background:{type:ColorType.Solid,color:'transparent'},textColor:'#84919c',fontSize:11,attributionLogo:false},
-   grid:{vertLines:{visible:false},horzLines:{color:'#222932'}},rightPriceScale:{borderVisible:false},timeScale:{borderVisible:false},crosshair:{vertLine:{color:'#698b71'},horzLine:{color:'#698b71'}},
-   handleScroll:!decor,handleScale:!decor})
-  const series=chart.addSeries(AreaSeries,{lineColor:'#a5f47b',topColor:'rgba(132,234,104,.28)',bottomColor:'rgba(132,234,104,.01)',lineWidth:2,priceLineVisible:false,lastValueVisible:false})
-  const unique=new Map<number,number>()
-  for(const p of points){const at=Math.floor(new Date(p.date).getTime()/1000);if(Number.isFinite(at)&&Number.isFinite(Number(p.price)))unique.set(at,Number(p.price))}
-  series.setData([...unique].sort((a,b)=>a[0]-b[0]).map(([time,value])=>({time:time as UTCTimestamp,value})))
-  chart.timeScale().fitContent()
-  return ()=>chart.remove()
- },[points,decor])
- return <div ref={ref} className="chart" aria-label="График цен"/>
-}
+function Chart(props:{points:Point[];decor?:boolean}){return <Suspense fallback={<div className="chart skeleton"/>}><PriceChart {...props}/></Suspense>}
 function telegramSlug(signal:Signal){
  const slug=signal.state==='demo'?signal.details.telegram_slug:signal.details.id
  return typeof slug==='string'&&/^[a-z][a-z0-9]{0,69}-[1-9][0-9]{0,9}$/i.test(slug)&&
@@ -76,10 +70,11 @@ function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
  const d=signal.details
  const profitable=Number(d.profit)>0
  return <button className="signal-card" onClick={onClick}>
-  <div className="signal-media"><Art signal={signal}/><span className="strategy">{d.market}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
-  <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div><span className="roi">{Number(d.roi)>0?'+':''}{f(d.roi)}%</span></div>
-  <div className="gift-attributes"><span>{d.symbol}</span><span>{d.evidence==='asks'?'Предварительный расчёт':strategyNames[signal.strategy]}</span></div>
-  <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Оценка · {d.evidence==='asks'?'по объявлениям':d.evidence==='sales'?'по продажам':'нет аналогов'}</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{d.profit==null?'Нужны аналоги':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div></div>
+  <div className="signal-media"><Art signal={signal}/></div>
+  <div className="signal-body"><div className="signal-heading"><strong>{d.title}</strong><small>#{d.number}</small></div>
+  <div className="gift-model">{d.model}</div>
+  <div className="gift-price">{f(d.purchase)} <span>{d.currency}</span><ArrowUpRight size={13}/></div>
+  <div className="gift-profit"><small>Расчётная прибыль</small><b className={profitable?'positive':''}>{d.profit==null?'Нет оценки':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
@@ -153,12 +148,15 @@ function App(){
  const run=async(task:()=>Promise<void>)=>{if(busy)return;setBusy(true);try{await task()}catch(e){announce(e)}finally{setBusy(false)}}
  useEffect(()=>{
   tg?.ready();tg?.expand()
-  Promise.allSettled([api<Signal[]>('/demo').then(setSamples),api<Market[]>('/market-status').then(setMarkets),
-   ...(auth?[loadMe().then(profile=>profile.active?liveFeed():undefined),loadItems()]:[])])
-   .then(results=>{const failure=results.find(result=>result.status==='rejected');if(failure?.status==='rejected')announce(failure.reason)})
-   .finally(()=>setLoading(false))
+  void api<Market[]>('/market-status').then(setMarkets).catch(announce)
+  const boot=auth?loadMe().then(profile=>profile.active?liveFeed():undefined):api<Signal[]>('/demo').then(setSamples)
+  void boot.catch(announce).finally(()=>setLoading(false))
+  const splashTimer=window.setTimeout(()=>setShowSplash(false),700)
+  const themeTimer=window.setInterval(updateTimeTheme,60000)
+  document.addEventListener('visibilitychange',updateTimeTheme)
+  return()=>{clearTimeout(splashTimer);clearInterval(themeTimer);document.removeEventListener('visibilitychange',updateTimeTheme)}
  },[])
- useEffect(()=>{if(loading)return;const id=window.setTimeout(()=>setShowSplash(false),650);return()=>clearTimeout(id)},[loading])
+ useEffect(()=>{if(auth&&page==='Портфель')void loadItems().catch(announce)},[page])
  useEffect(()=>{if(!toast)return;const id=window.setTimeout(()=>setToast(''),4800);return()=>clearTimeout(id)},[toast])
  useEffect(()=>{
   if(!me?.active)return
@@ -230,9 +228,8 @@ function App(){
     <div className="empty"><ScanLine size={25}/><strong>Подходящих сигналов пока нет</strong><span>Совпадений с заданными фильтрами сейчас нет. Нажмите «Найти» для обновления.</span></div>
  }
  return <MotionConfig reducedMotion="user"><div className="app-root">
-  {showSplash&&<div className={`splash ${loading?'':'splash-ready'}`} aria-label="GOAT NFT загружается">
-   <div className="splash-glow"/><img src={goatMark} alt=""/><strong>GOAT NFT</strong><small>умный сканер Telegram Gifts</small>
-   <div className="splash-dots" aria-hidden="true"><i/><i/><i/></div>
+  {showSplash&&<div className="splash" role="status" aria-label="GOAT NFT загружается">
+   <img src={goatMark} alt=""/><strong>GOAT NFT</strong><small>Telegram Gifts</small>
   </div>}
   <div className="shell">
   <aside className="sidebar">
@@ -243,28 +240,28 @@ function App(){
    <div className="side-bottom"><button onClick={()=>bot('support')}><CircleHelp size={18}/><span>Поддержка</span></button><button onClick={()=>change('Профиль')} className="side-profile"><span className="avatar">{me?.photo?<img src={me.photo} alt=""/>:me?.name.slice(0,1)??'G'}</span><span><strong>{me?.name??'Гость'}</strong><small>{me?.active?'GOAT PRO':'Демо-доступ'}</small></span><ChevronDown size={14}/></button></div>
   </aside>
   <div className="work">
-   <header className="top"><div className="breadcrumb"><span className="mobile-brand"><img src={goatMark} alt=""/></span><span>GOAT NFT</span><span>/</span><strong>{page}</strong></div><div className="top-actions"><span className={'mode '+(!isDemo?'live':'')}><span/>{isDemo?'Демо-режим':'GOAT PRO'}</span><button className="icon-button" title="Настройки уведомлений" onClick={()=>{change('Профиль');setShowPrefs(true)}}><Bell size={18}/></button><button className="avatar" title="Профиль" onClick={()=>change('Профиль')}>{me?.name.slice(0,1)??'G'}</button></div></header>
+   <header className="top"><div className="breadcrumb"><span className="mobile-brand"><img src={goatMark} alt=""/></span><span>GOAT NFT</span><span>/</span><strong>{page}</strong></div><div className="top-actions"><span className={'mode '+(!isDemo?'live':'')}><span/>{loading&&!me?'Подключение':isDemo?'Нет подписки':'GOAT PRO'}</span><button className="icon-button" title="Настройки уведомлений" onClick={()=>{change('Профиль');setShowPrefs(true)}}><Bell size={18}/></button><button className="avatar" title="Профиль" onClick={()=>change('Профиль')}>{me?.name.slice(0,1)??'G'}</button></div></header>
    <main><motion.div key={page} initial={{opacity:0,y:5}} animate={{opacity:1,y:0}} transition={{duration:.2}}>
    {page==='Главная'&&<>
     <div className="intro"><div><div className="eyebrow"><span/> ОБЗОР РЫНКА</div><h1>{me?'Привет, '+me.name.split(' ')[0]:'Маркет подарков'}</h1><p>Ищите настоящие Telegram Gifts и сравнивайте цены в GRAM.</p></div><button className="primary" onClick={()=>change('Сканер')}><ScanLine size={17}/> Найти подарок <ArrowRight size={16}/></button></div>
-    {isDemo&&<div className="demo-note"><FlaskConical size={17}/><span><strong>Подарки из Telegram.</strong> Цены, сделки и график в демо синтетические.</span><button onClick={()=>change('Профиль')}>О GOAT PRO <ArrowUpRight size={14}/></button></div>}
+    {isDemo&&!loading&&<div className="demo-note"><FlaskConical size={17}/><span>Откройте приложение через бота с активной подпиской, чтобы искать подарки.</span><button onClick={()=>change('Профиль')}>О GOAT PRO <ArrowUpRight size={14}/></button></div>}
     <div className="metrics">
      <div className="metric"><div><span className="metric-icon"><Radio size={18}/></span><span>Возможности</span></div><strong>{source.length}</strong><small>{isDemo?'Примеры в демо':'Совпадения с вашими фильтрами'}</small></div>
      <div className="metric"><div><span className="metric-icon"><ChartNoAxesCombined size={18}/></span><span>Средний ROI</span></div><strong className="green">{source.length?'+'+f(source.reduce((sum,s)=>sum+Number(s.details.roi),0)/source.length)+'%':'—'}</strong><small>После расчётных расходов</small></div>
-     <div className="metric"><div><span className="metric-icon"><Wallet size={17}/></span><span>Торговый капитал</span></div><strong>{f(me?.prefs.capital??100)} <em>TON</em></strong><small>{me?'Из вашего профиля':'Рекомендуемый старт'}</small></div>
-     <div className="metric"><div><span className="metric-icon muted-icon"><Globe2 size={17}/></span><span>Маркетплейсы</span></div><strong>{markets.filter(m=>m.status==='online').length}<em> / 2</em></strong><small>Подключённые источники</small></div>
+     <div className="metric"><div><span className="metric-icon"><Wallet size={17}/></span><span>Мой бюджет</span></div><strong>{f(me?.prefs.capital)} <em>GRAM</em></strong><small>Указан вами в профиле</small></div>
+     <div className="metric"><div><span className="metric-icon muted-icon"><Globe2 size={17}/></span><span>Portals</span></div><strong className="source-status">{markets.some(m=>m.component.toLowerCase().includes('portals')&&m.status==='online')?'Подключён':'Проверяем'}</strong><small>Реальные объявления</small></div>
     </div>
-    <div className="overview"><section className="panel chart-panel"><div className="panel-head"><div><h2>Динамика цен</h2><p>{chart.length?source[0].details.title+' · '+source[0].details.currency:'История сопоставимых продаж'}</p></div><div className="segmented">{[7,14,30].map(n=><button key={n} className={range===n?'chosen':''} onClick={()=>setRange(n)}>{n} д</button>)}</div></div>{chart.length?<Chart points={chart}/>:<div className="empty">Пока нет достаточной истории продаж</div>}</section>
+    <div className={chart.length?"overview":"overview sources-only"}>{chart.length>0&&<section className="panel chart-panel"><div className="panel-head"><div><h2>Динамика цен</h2><p>{chart.length?source[0].details.title+' · '+source[0].details.currency:'История сопоставимых продаж'}</p></div><div className="segmented">{[7,14,30].map(n=><button key={n} className={range===n?'chosen':''} onClick={()=>setRange(n)}>{n} д</button>)}</div></div>{chart.length?<Chart points={chart}/>:<div className="empty">Пока нет достаточной истории продаж</div>}</section>}
     <section className="panel connection"><div className="panel-head"><div><h2>Источники данных</h2><p>Состояние интеграций</p></div><Activity size={18}/></div>
-      {markets.map((m,i)=><div className="market-row" key={m.component}><span className={'market-icon market-'+i}>{i===0?<Gem size={19}/>:<Activity size={18}/>}</span><div><strong>{m.component}</strong><small>{m.checked_at?'Проверено '+fmtDate(m.checked_at):'Маркетплейс Telegram Gifts'}</small></div><span className={'status '+(m.status==='online'?'online':'')}>{statusNames[m.status]??m.status}</span></div>)}
-      <div className="market-foot"><ShieldCheck size={16}/> Статус показывает доступ терминала к данным.</div>
+      {markets.filter(m=>m.status!=='disabled').map((m,i)=><div className="market-row" key={m.component}><span className={'market-icon market-'+i}>{i===0?<Gem size={19}/>:<Activity size={18}/>}</span><div><strong>{m.component}</strong><small>{m.checked_at?'Проверено '+fmtDate(m.checked_at):'Маркетплейс Telegram Gifts'}</small></div><span className={'status '+(m.status==='online'?'online':'')}>{statusNames[m.status]??m.status}</span></div>)}
+      <div className="market-foot"><ShieldCheck size={16}/> Оценка по объявлениям. История продаж доступна не для всех подарков.</div>
     </section></div>
-    <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Настоящие карточки, учебные цены в GRAM':'Расчётные торговые возможности'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
+    <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Для поиска нужна подписка':'Расчёт после комиссий · не гарантированная прибыль'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
    </>}
    {page==='Сканер'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Лоты Portals по вашему бюджету и сохранённым фильтрам. Обход рынка продолжается.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
+    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Для поиска откройте приложение через бота с активной подпиской.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Лоты Portals по вашему бюджету и сохранённым фильтрам. Обход рынка продолжается.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
     <div className="segmented scanner-tabs"><button className={scannerMode==='opportunities'?'chosen':''} onClick={()=>{setScannerMode('opportunities');if(!isDemo)void searchGifts('opportunities')}}>Выгодные</button><button className={scannerMode==='market'?'chosen':''} onClick={()=>{setScannerMode('market');if(!isDemo)void searchGifts('market')}}>Весь рынок</button></div>
-    <div className="panel filters"><Field label="Поиск подарка · фильтры применяются кнопкой «Найти»"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();if(!isDemo)void searchGifts()}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');if(!isDemo)void searchGifts(scannerMode,'')}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={searching}>{searching?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
+    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();if(!isDemo)void searchGifts()}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');if(!isDemo)void searchGifts(scannerMode,'')}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={searching}>{searching?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
     <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Все доступные</option><option>Portals</option></select></Field>
     <Field label="Номер подарка"><select value={numberFilter} onChange={e=>setNumberFilter(e.target.value)}><option value="all">Любой</option><option value="rare">Редкие номера</option><option value="low">№ 1–100</option><option value="repeat">Одинаковые цифры</option><option value="palindrome">Зеркальные</option><option value="round">Круглые сотни</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}

@@ -1,0 +1,30 @@
+GOAT NFT — Portals-inspired interface, 2026-11-27
+
+Reference: inspected the live Portals Market mini app in the user's Telegram.
+Design: compact rounded gift tiles, inset square artwork, title and serial number,
+blue price pill, explicit estimated-profit label; no decorative outlines or glows.
+Three columns on mobile. Search and strict server-side filters are preserved.
+
+Local time theme: 07:00–17:59 light, 18:00–21:59 evening, 22:00–06:59 dark.
+Re-evaluated each minute and when the WebView becomes visible. Blue stays the accent.
+Splash lasts at most 700 ms after React mount; it does not wait for network requests.
+Signals keep their loading placeholders. Portfolio loads when opened.
+Chart library is lazy loaded only when a real chart is rendered.
+Avatar is served as a 32 KB WebP instead of the 1.3 MB source PNG.
+
+Data honesty: no fabricated wallet balance or sales history. The budget is the
+saved user preference, labelled GRAM. Disabled integrations are hidden, rather
+than included in an arbitrary /2 connection count. Chart only shown with data.
+The bot's existing button already says «Возможности сервиса» correctly.
+
+Avatar generated with built-in image_gen, original retained locally as
+frontend/src/art/goat-avatar.png; optimized production asset goat-avatar.webp.
+Prompt: Use case: logo-brand. Create a polished square Telegram avatar for GOAT NFT:
+a very simple original solid white goat head silhouette, confidently reduced to
+smooth clean curves, two elegant horns and two ears, a small negative-space
+suggestion of face, centered with generous margins on a smooth blue gradient from
+light sky blue at top to vivid Telegram blue at bottom. Flat vector-like graphic,
+beautifully balanced recognizable at 32px, like the simplicity of a premium
+messenger app icon. No text, no outlines, no 3D, no shadow, no texture, no decorative
+circles, no rocket. Full bleed square background.
+
