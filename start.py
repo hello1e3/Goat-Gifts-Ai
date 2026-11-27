@@ -52,10 +52,10 @@ async def lifespan(app):
             adapters.append(MRKT(client, config.mrkt_api_key))
         else:
             status["MRKT"] = "key_required"
-        if not config.portals_data_licensed:
-            status["Portals"] = "license_required"
-        elif not config.portals_api_key:
+        if not config.portals_api_key:
             status["Portals"] = "key_required"
+        elif not config.portals_api_key.startswith("tma ") and not config.portals_data_licensed:
+            status["Portals"] = "license_required"
         else:
             adapters.append(Portals(client, config.portals_api_key))
         try:
