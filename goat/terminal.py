@@ -48,7 +48,7 @@ async def signals(conn, prefs: Preferences, history=False):
     return await rows(conn, """
         select t.* from trading_signals t join system_health h on h.component=t.listing_market
         join system_health e on e.component=t.details->>'exit_market'
-        cross join lateral (select case when t.details->>'currency'='TON' then 1 else (
+        cross join lateral (select case when t.details->>'currency' in ('TON','GRAM') then 1 else (
             select rate from currency_rates where base=t.details->>'currency' and quote='TON'
             and observed_at>now()-interval '24 hours' order by observed_at desc limit 1
         ) end as rate) fx
@@ -68,7 +68,7 @@ async def signals(conn, prefs: Preferences, history=False):
         collections=prefs.collections)
 
 
-async def catalog(conn, search=""):
+async def catalog(conn, search="", offset=0, limit=60):
     query_text = search.strip()[:80]
     entries = await rows(conn, """
         select l.market,l.external_id,l.price,l.currency,l.url,l.transferable_at,l.observed_at,l.floor,
@@ -78,8 +78,8 @@ async def catalog(conn, search=""):
           and (:search='' or g.title ilike '%'||:search||'%' or g.collection ilike '%'||:search||'%'
                or g.model ilike '%'||:search||'%' or g.backdrop ilike '%'||:search||'%'
                or g.symbol ilike '%'||:search||'%' or cast(g.number as text)=:search)
-        order by l.price asc,l.observed_at desc limit 120
-    """, search=query_text)
+        order by l.observed_at desc,l.price asc limit :limit offset :offset
+    """, search=query_text, limit=limit, offset=offset)
     fee = await scalar(conn, "select fees from marketplace_fees where market='Portals'")
     listings = []
     for row in entries:
