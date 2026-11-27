@@ -1,11 +1,13 @@
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 import asyncio
 import io
 import json
 import re
 import secrets
 from uuid import UUID, uuid4
+
+import httpx
 
 from aiogram import Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -90,15 +92,69 @@ def make_dispatcher(db, config):
         return await register(conn, user.id, user.username, user.full_name, source=source, bot=True)
 
     def admin_menu():
-        labels = list(ADMIN)
-        return buttons(*[
-            tuple({"text": label, "callback_data": f"owner:{index+j}"}
-                  for j, label in enumerate(labels[index:index+2]))
-            for index in range(0, len(labels), 2)
-        ])
+        return buttons(
+            ({"text": "Цена", "callback_data": "adminset:price"},
+             {"text": "Курс Stars", "callback_data": "adminset:star"}),
+            ({"text": "Курс USDT", "callback_data": "adminset:usdt"},
+             {"text": "Карта", "callback_data": "adminset:card"}),
+            ({"text": "Crypto Pay", "callback_data": "adminset:crypto"},
+             {"text": "Статистика", "callback_data": "owner:stats"}),
+            ({"text": "Пользователи", "callback_data": "owner:users"},
+             {"text": "Заявки", "callback_data": "owner:orders"}),
+            ({"text": "Выдать доступ", "callback_data": "owner:access"},
+             {"text": "Поддержка", "callback_data": "owner:support"}),
+            ({"text": "Кастомные эмодзи", "callback_data": "owner:emoji"},
+             {"text": "Дополнительно", "callback_data": "owner:advanced"}),
+        )
 
     def admin_back():
         return buttons(({"text": "← Админка", "callback_data": "owner:home"},))
+
+    async def pricing(conn):
+        plan = await one(conn, "select price,enabled,approval from subscription_plans where id=:id", id=PLAN)
+        value = await scalar(conn, "select value from system_settings where key='subscription_pricing'") or {}
+        star_rub = Decimal(str(value.get("star_rub") or "1.5"))
+        price_rub = Decimal(str(value.get("price_rub") or ((plan["price"] or 0) * star_rub)))
+        usdt_rub = Decimal(str(value.get("usdt_rub") or "82.05"))
+        return plan, {"price_rub": price_rub, "star_rub": star_rub, "usdt_rub": usdt_rub}
+
+    async def crypto_api(token, method, **params):
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(f"https://pay.crypt.bot/api/{method}",
+                                         headers={"Crypto-Pay-API-Token": token}, json=params)
+        data = response.json()
+        if response.status_code != 200 or not data.get("ok"):
+            raise ValueError("Crypto Pay временно недоступен")
+        return data["result"]
+
+    async def admin_panel(conn):
+        plan, price = await pricing(conn)
+        card = await card_settings(conn) or {}
+        crypto = await scalar(conn, "select value from system_settings where key='crypto_pay'") or {}
+        report = await statistics(conn, 0)
+        stars = max(1, int((price["price_rub"] / price["star_rub"]).to_integral_value(rounding=ROUND_CEILING)))
+        usdt = (price["price_rub"] / price["usdt_rub"]).quantize(Decimal(".01"), rounding=ROUND_CEILING)
+        text = "\n".join((
+            "GOAT NFT — администрирование", "",
+            f"Цена: {price['price_rub']:g} ₽ · {stars} Stars · {usdt:g} USDT",
+            f"Курс Stars: 1 Star = {price['star_rub']:g} ₽",
+            f"Курс USDT: 1 USDT = {price['usdt_rub']:g} ₽",
+            f"Карта: {'•••• ' + re.sub(r'\\D', '', str(card.get('requisite', '')))[-4:] if card.get('enabled') else 'не настроена'}",
+            f"Crypto Pay: {'подключён' if crypto.get('enabled') and crypto.get('token') else 'не настроен'}",
+            f"Продажи: {'включены' if plan and plan['enabled'] else 'выключены'} · режим: {'ручной' if plan and plan['approval'] else 'автоматический'}", "",
+            f"Продаж: {report['sales']} · пользователей: {report['users']}",
+            f"Выручка: {report['gross']} Stars · возвраты: {report['refund_count']}",
+            f"Активных подписок: {report['subscribed']} · ожидают: {report['pending']}",
+        ))
+        return text, admin_menu()
+
+    async def show_admin(target):
+        async with db.transaction() as conn:
+            text, markup = await admin_panel(conn)
+        if isinstance(target, CallbackQuery):
+            await edit_or_answer(target, text, markup)
+        else:
+            await target.answer(text, reply_markup=markup)
 
     async def edit_or_answer(call, text, markup=None):
         try:
@@ -112,6 +168,8 @@ def make_dispatcher(db, config):
             await touch(conn, user)
             plan = await one(conn, "select price,enabled,discount,discount_until from subscription_plans where id=:id", id=PLAN)
             card = await card_settings(conn)
+            crypto = await scalar(conn, "select value from system_settings where key='crypto_pay'") or {}
+            _, price = await pricing(conn)
         choices = []
         lines = ["💎 GOAT PRO · 30 дней", "Выберите способ оплаты."]
         if plan and plan["enabled"] and plan["price"]:
@@ -121,6 +179,9 @@ def make_dispatcher(db, config):
             choices.append(({"text": f"⭐ Telegram Stars · {price}", "callback_data": "pay:stars"},))
         if card and card.get("enabled") and card.get("amount"):
             choices.append(({"text": f"💳 Перевод · {card['amount']} ₽", "callback_data": "pay:card"},))
+        if crypto.get("enabled") and crypto.get("token"):
+            amount = (price["price_rub"] / price["usdt_rub"]).quantize(Decimal(".01"), rounding=ROUND_CEILING)
+            choices.append(({"text": f"Crypto Pay · {amount:g} USDT", "callback_data": "pay:crypto"},))
         if not choices:
             lines.append("Продажи сейчас закрыты. Настройте цену в админке.")
         choices.append(({"text": "← Главное меню", "callback_data": "home"},))
@@ -281,7 +342,7 @@ def make_dispatcher(db, config):
         name, raw = command.command, command.args or ""
         args = raw.split()
         if name == "admin":
-            await message.answer("👑 GOAT NFT · Администрирование", reply_markup=admin_menu())
+            await show_admin(message)
             return
         try:
             payload = {}
@@ -614,6 +675,53 @@ def make_dispatcher(db, config):
                     "После перевода нажмите кнопку ниже. Администратор проверит поступление."), buttons(
                     ({"text": "Я перевёл — проверить", "callback_data": "card:request"},),
                     ({"text": "← Способы оплаты", "callback_data": "buy"},)))
+            elif data == "pay:crypto":
+                async with db.transaction() as conn:
+                    await touch(conn, call.from_user)
+                    crypto = await scalar(conn, "select value from system_settings where key='crypto_pay'") or {}
+                    _, price = await pricing(conn)
+                if not crypto.get("enabled") or not crypto.get("token"):
+                    raise ValueError("Crypto Pay сейчас недоступен")
+                amount = (price["price_rub"] / price["usdt_rub"]).quantize(Decimal(".01"), rounding=ROUND_CEILING)
+                invoice = await crypto_api(crypto["token"], "createInvoice", asset="USDT", amount=str(amount),
+                                           description="GOAT PRO · 30 дней", payload=str(uid), expires_in=3600)
+                async with db.transaction() as conn:
+                    await query(conn, """insert into system_settings(key,value) values(:key,cast(:value as jsonb))
+                        on conflict(key) do update set value=excluded.value""",
+                        key=f"crypto-invoice:{invoice['invoice_id']}", value=json.dumps({
+                            "user_id":uid, "amount":str(amount), "status":"active",
+                            "created_at":datetime.now(UTC).timestamp()}))
+                await edit_or_answer(call, f"Crypto Pay\n\nК оплате: {amount:g} USDT\nСчёт действует 1 час.", buttons(
+                    ({"text":"Открыть счёт", "url":invoice["bot_invoice_url"]},),
+                    ({"text":"Проверить оплату", "callback_data":f"crypto:{invoice['invoice_id']}"},),
+                    ({"text":"← Способы оплаты", "callback_data":"buy"},)))
+            elif data.startswith("crypto:"):
+                invoice_id = data.split(":", 1)[1]
+                async with db.transaction() as conn:
+                    stored = await scalar(conn, "select value from system_settings where key=:key for update",
+                                          key=f"crypto-invoice:{invoice_id}")
+                    crypto = await scalar(conn, "select value from system_settings where key='crypto_pay'") or {}
+                if not stored or stored.get("user_id") != uid or stored.get("status") != "active":
+                    raise ValueError("Счёт уже обработан или не найден")
+                result = await crypto_api(crypto.get("token", ""), "getInvoices", invoice_ids=invoice_id)
+                invoices = result.get("items", [])
+                if not invoices or invoices[0].get("status") != "paid":
+                    await edit_or_answer(call, "Оплата пока не найдена. После платежа нажмите «Проверить оплату».", buttons(
+                        ({"text":"Проверить оплату", "callback_data":f"crypto:{invoice_id}"},),
+                        ({"text":"← Способы оплаты", "callback_data":"buy"},)))
+                else:
+                    async with db.transaction() as conn:
+                        current = await scalar(conn, "select value from system_settings where key=:key for update",
+                                               key=f"crypto-invoice:{invoice_id}")
+                        if current and current.get("status") == "active":
+                            entry = await grant(conn, uid, 30 * DAY, "paid", actor=uid,
+                                                reason=f"Crypto Pay invoice {invoice_id}")
+                            current["status"] = "paid"
+                            current["grant_id"] = entry["id"]
+                            await query(conn, "update system_settings set value=cast(:value as jsonb) where key=:key",
+                                        value=json.dumps(current), key=f"crypto-invoice:{invoice_id}")
+                    await edit_or_answer(call, "Оплата получена. GOAT PRO активирован на 30 дней.",
+                                         buttons(({"text":"Главное меню", "callback_data":"home"},)))
             elif data == "card:request":
                 async with db.transaction() as conn:
                     await touch(conn, call.from_user)
@@ -688,41 +796,61 @@ def make_dispatcher(db, config):
                 else:
                     await call.message.answer(result[:4000])
             elif uid in config.admins:
-                if data.startswith("owner:"):
+                if data.startswith("adminset:"):
+                    key = data.split(":", 1)[1]
+                    prompts = {
+                        "price": "Цена в рублях\n\nОтправьте новую цену, например: 1000\nStars и USDT пересчитаются автоматически.",
+                        "star": "Курс Stars\n\nСколько рублей стоит 1 Star? Например: 1.5",
+                        "usdt": "Курс USDT\n\nСколько рублей стоит 1 USDT? Например: 82.05",
+                        "card": "Оплата на карту\n\nОтправьте три строки:\nномер карты\nполучатель\nбанк\n\nОтправьте - чтобы отключить.",
+                        "crypto": "Crypto Pay\n\nОтправьте API-токен приложения из @CryptoBot → Crypto Pay → My Apps.\nОтправьте - чтобы отключить.",
+                    }
+                    if key not in prompts:
+                        raise ValueError("Настройка недоступна")
+                    async with db.transaction() as conn:
+                        await set_admin_input(conn, uid, {"action":"admin_setting", "key":key,
+                                                         "message_id":call.message.message_id})
+                    await edit_or_answer(call, prompts[key], admin_back())
+                elif data.startswith("adminemoji:"):
+                    category = data.split(":", 1)[1]
+                    if category not in EMOJIS:
+                        raise ValueError("Категория недоступна")
+                    async with db.transaction() as conn:
+                        await set_admin_input(conn, uid, {"action":"admin_emoji", "category":category,
+                                                         "message_id":call.message.message_id})
+                    await edit_or_answer(call, f"Кастомный эмодзи: {category}\n\nОтправьте один Premium-эмодзи.", admin_back())
+                elif data.startswith("owner:"):
                     value = data.split(":", 1)[1]
                     if value == "home":
-                        await edit_or_answer(call, "👑 GOAT NFT · Администрирование", admin_menu())
-                        return
-                    label = list(ADMIN)[int(value)]
-                    if label in {"Статистика", "Продажи"}:
+                        await show_admin(call)
+                    elif value == "stats":
                         async with db.transaction() as conn:
-                            report = await statistics(conn, 1 if label == "Статистика" else 30)
-                        await edit_or_answer(call, f"📊 {label}\n\n{stats_text(report)}", admin_back())
-                    elif label in {"Заявки", "Поддержка", "Сервер"}:
+                            report = await statistics(conn, 0)
+                        await edit_or_answer(call, "Статистика\n\n" + stats_text(report), admin_back())
+                    elif value in {"users", "orders", "support"}:
                         statements = {
-                            "Заявки": "select id,user_id,amount,status,expires_at from orders where status='pending_approval' order by created_at desc limit 15",
-                            "Поддержка": "select id,user_id,category,status,unread_admin from support_tickets where status<>'closed' order by unread_admin desc,id desc limit 15",
-                            "Сервер": "select component,status,checked_at from system_health",
+                            "users": "select id,coalesce(username,name) name,last_seen from users where registered and not erased order by last_seen desc limit 15",
+                            "orders": "select id,user_id,amount,status,created_at from orders order by created_at desc limit 15",
+                            "support": "select id,user_id,category,status,unread_admin from support_tickets where status<>'closed' order by unread_admin desc,id desc limit 15",
                         }
                         async with db.transaction() as conn:
-                            entries = await rows(conn, statements[label])
-                        markup = admin_back()
-                        if label == "Заявки" and entries:
-                            markup = buttons(*[({"text": f"Одобрить · {row['user_id']}", "callback_data": f"review:y:{row['id']}"},
-                                                {"text": "Отклонить", "callback_data": f"review:n:{row['id']}"}) for row in entries],
-                                             ({"text": "← Админка", "callback_data": "owner:home"},))
-                        elif label == "Поддержка" and entries:
-                            markup = buttons(*[({"text": f"Открыть #{row['id']}", "callback_data": f"ticket:{row['id']}"},) for row in entries],
-                                             ({"text": "← Админка", "callback_data": "owner:home"},))
+                            entries = await rows(conn, statements[value])
+                        title = {"users":"Пользователи", "orders":"Заявки и покупки", "support":"Поддержка"}[value]
                         text = "\n".join(" · ".join(map(str, row.values())) for row in entries) or "Записей нет."
-                        await edit_or_answer(call, f"{label}\n\n{text}"[:4000], markup)
-                    elif label == "Выдать доступ":
+                        await edit_or_answer(call, f"{title}\n\n{text}"[:4000], admin_back())
+                    elif value == "access":
                         async with db.transaction() as conn:
-                            await set_admin_input(conn, uid, {"action":"grant_user"})
-                        await edit_or_answer(call, "Введите Telegram ID или @username следующим сообщением.\n"
-                                                   "Для приглашения используйте /invite ДНИ.", admin_back())
+                            await set_admin_input(conn, uid, {"action":"grant_user", "message_id":call.message.message_id})
+                        await edit_or_answer(call, "Выдать доступ\n\nОтправьте Telegram ID или @username.", admin_back())
+                    elif value == "emoji":
+                        cats = ("logo", "gift", "chart", "profit", "money", "stars", "settings", "success")
+                        await edit_or_answer(call, "Кастомные эмодзи\n\nВыберите место, затем отправьте Premium-эмодзи.", buttons(
+                            *[({"text": cat, "callback_data": f"adminemoji:{cat}"},) for cat in cats],
+                            ({"text":"← Админка", "callback_data":"owner:home"},)))
+                    elif value == "advanced":
+                        await edit_or_answer(call, "Дополнительные функции\n\nПромокоды, рассылки, комиссии площадок и системные настройки остаются доступны командами администратора.", admin_back())
                     else:
-                        await edit_or_answer(call, f"{label}\n\n{ADMIN[label]}", admin_back())
+                        raise ValueError("Раздел недоступен")
                 elif data.startswith("granttime:"):
                     _, target, seconds = data.split(":")
                     async with db.transaction() as conn:
@@ -782,14 +910,93 @@ def make_dispatcher(db, config):
                     await query(conn, "delete from system_settings where key=:k", k=f"admin-input:{uid}")
             if pending and pending["expires"] >= datetime.now(UTC).timestamp():
                 try:
-                    if pending["action"] == "grant_user":
+                    if pending["action"] == "admin_setting":
+                        raw = (body or "").strip()
+                        key = pending["key"]
+                        if key == "crypto" and raw != "-":
+                            async with httpx.AsyncClient(timeout=10) as client:
+                                check = await client.post("https://pay.crypt.bot/api/getMe",
+                                    headers={"Crypto-Pay-API-Token": raw})
+                            if check.status_code != 200 or not check.json().get("ok"):
+                                raise ValueError("Токен Crypto Pay не подошёл")
+                        async with db.transaction() as conn:
+                            plan, values = await pricing(conn)
+                            if key == "price":
+                                value = Decimal(raw.replace(",", "."))
+                                if not Decimal("1") <= value <= Decimal("1000000"):
+                                    raise ValueError("Цена должна быть от 1 до 1 000 000 ₽")
+                                values["price_rub"] = value
+                            elif key == "star":
+                                value = Decimal(raw.replace(",", "."))
+                                if not Decimal("0.01") <= value <= Decimal("100"):
+                                    raise ValueError("Курс Stars должен быть от 0.01 до 100 ₽")
+                                values["star_rub"] = value
+                            elif key == "usdt":
+                                value = Decimal(raw.replace(",", "."))
+                                if not Decimal("1") <= value <= Decimal("10000"):
+                                    raise ValueError("Курс USDT должен быть от 1 до 10 000 ₽")
+                                values["usdt_rub"] = value
+                            elif key == "card":
+                                if raw == "-":
+                                    card = {"enabled": False}
+                                else:
+                                    parts = [part.strip() for part in raw.splitlines() if part.strip()]
+                                    if len(parts) < 3 or len(re.sub(r"\D", "", parts[0])) < 12:
+                                        raise ValueError("Нужны три строки: номер карты, получатель, банк")
+                                    card = {"enabled": True, "amount": str(values["price_rub"]),
+                                            "requisite": parts[0][:300], "recipient": parts[1][:120],
+                                            "bank": parts[2][:120]}
+                                await query(conn, """insert into system_settings values('card_payment',cast(:v as jsonb))
+                                    on conflict(key) do update set value=excluded.value""", v=json.dumps(card))
+                            elif key == "crypto":
+                                crypto = {"enabled": raw != "-", "token": "" if raw == "-" else raw}
+                                await query(conn, """insert into system_settings values('crypto_pay',cast(:v as jsonb))
+                                    on conflict(key) do update set value=excluded.value""", v=json.dumps(crypto))
+                            if key in {"price", "star", "usdt"}:
+                                packed = {name: str(value) for name, value in values.items()}
+                                await query(conn, """insert into system_settings values('subscription_pricing',cast(:v as jsonb))
+                                    on conflict(key) do update set value=excluded.value""", v=json.dumps(packed))
+                                stars = max(1, int((values["price_rub"] / values["star_rub"]).to_integral_value(rounding=ROUND_CEILING)))
+                                await query(conn, "update subscription_plans set price=:price,enabled=true where id=:id",
+                                            price=stars, id=PLAN)
+                                await query(conn, """update system_settings set value=jsonb_set(value,'{amount}',to_jsonb(cast(:amount as text)))
+                                    where key='card_payment' and coalesce((value->>'enabled')::boolean,false)""",
+                                            amount=str(values["price_rub"]))
+                            text, markup = await admin_panel(conn)
+                        try:
+                            await message.delete()
+                        except TelegramBadRequest:
+                            pass
+                        await message.bot.edit_message_text(chat_id=uid, message_id=pending["message_id"],
+                                                            text=text, reply_markup=markup)
+                    elif pending["action"] == "admin_emoji":
+                        ids = emoji_ids(message)
+                        if not ids:
+                            raise ValueError("Отправьте один кастомный Premium-эмодзи")
+                        async with db.transaction() as conn:
+                            await query(conn, """insert into custom_emojis(category,emoji_id) values(:category,:emoji)
+                                on conflict(category) do update set emoji_id=excluded.emoji_id""",
+                                        category=pending["category"], emoji=ids[0])
+                            text, markup = await admin_panel(conn)
+                        try:
+                            await message.delete()
+                        except TelegramBadRequest:
+                            pass
+                        await message.bot.edit_message_text(chat_id=uid, message_id=pending["message_id"],
+                                                            text=text, reply_markup=markup)
+                    elif pending["action"] == "grant_user":
                         async with db.transaction() as conn:
                             target = await resolve(conn, (body or "").strip())
                         terms = (("24 часа",3600*24),("3 дня",3*DAY),("7 дней",7*DAY),("14 дней",14*DAY),
                                  ("30 дней",30*DAY),("90 дней",90*DAY),("Навсегда","forever"))
-                        await message.answer(f"Срок доступа для {target}", reply_markup=buttons(*[
-                            ({"text":label,"callback_data":f"granttime:{target}:{seconds}"},) for label,seconds in terms]))
-                        await message.answer(f"Для своего срока используйте /access {target} 45d [причина].")
+                        markup = buttons(*[({"text":label,"callback_data":f"granttime:{target}:{seconds}"},)
+                                           for label,seconds in terms],
+                                         ({"text":"← Админка","callback_data":"owner:home"},))
+                        if pending.get("message_id"):
+                            await message.bot.edit_message_text(chat_id=uid, message_id=pending["message_id"],
+                                                                text=f"Срок доступа для {target}", reply_markup=markup)
+                        else:
+                            await message.answer(f"Срок доступа для {target}", reply_markup=markup)
                     elif pending["action"] == "grant_reason":
                         p = {"target":pending["target"],"seconds":pending["seconds"],
                              "reason":"" if body == "-" else (body or "")[:500]}
@@ -797,8 +1004,15 @@ def make_dispatcher(db, config):
                     elif pending["action"] == "reply_ticket":
                         p = {"ticket":pending["ticket"], "text":body or "", **media}
                         await confirm(message, uid, "reply", p, f"Отправить ответ в обращение #{p['ticket']}?")
-                except ValueError as exc:
-                    await message.answer(str(exc))
+                except (ValueError, ArithmeticError, httpx.HTTPError) as exc:
+                    if pending.get("message_id"):
+                        try:
+                            await message.bot.edit_message_text(chat_id=uid, message_id=pending["message_id"],
+                                text=f"Ошибка: {exc}\n\nВернитесь в админку и попробуйте ещё раз.", reply_markup=admin_back())
+                        except TelegramBadRequest:
+                            await message.answer(str(exc), reply_markup=admin_back())
+                    else:
+                        await message.answer(str(exc))
                 return
         async with db.transaction() as conn:
             user = await touch(conn, message.from_user)
