@@ -25,7 +25,7 @@ const nf = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2})
 const f = (v:unknown) => v == null || !Number.isFinite(Number(v)) ? '—' : nf.format(Number(v))
 const fmtDate = (v:unknown) => v ? new Date(String(v)).toLocaleString('ru-RU',{dateStyle:'short',timeStyle:'short'}) : '—'
 const strategyNames:Record<string,string> = {floor:'Floor Flip',cross:'Cross-market',instant:'Instant Flip'}
-const statusNames:Record<string,string> = {license_required:'Ожидает разрешения',partner_contract_required:'Ожидает доступа',key_required:'Нужен API-ключ',unavailable:'Недоступен',online:'Подключён',stale:'Данные устарели',initializing:'Подключение'}
+const statusNames:Record<string,string> = {license_required:'Ожидает разрешения',partner_contract_required:'Ожидает доступа',key_required:'Нужен API-ключ',unavailable:'Недоступен',disabled:'Отключён',online:'Подключён',stale:'Данные устарели',initializing:'Подключение'}
 const nav = [{name:'Главная',icon:LayoutDashboard},{name:'Сканер',icon:ScanLine},{name:'Портфель',icon:Wallet},{name:'Аналитика',icon:BarChart3},{name:'Профиль',icon:UserRound}]
 const metricLabels: Record<string,string> = {
  cost:'Полная себестоимость', proceeds:'Чистая выручка', profit:'Расчётная прибыль', roi:'ROI, %',
@@ -115,7 +115,7 @@ function App(){
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
  const loadItems=async()=>setItems(await api<Item[]>('/portfolio'))
  const liveFeed=async()=>setLive(await api<Signal[]>('/signals'))
- const catalogFeed=async()=>setCatalogItems(await api<Signal[]>('/catalog'))
+ const catalogFeed=async(q='')=>setCatalogItems(await api<Signal[]>('/catalog'+(q?'?q='+encodeURIComponent(q):'')))
  const announce=(e:unknown)=>setToast(e instanceof Error?e.message:String(e))
  const change=(name:string)=>{tg?.HapticFeedback?.selectionChanged();setPage(name);setFilter('all');setMarket('all');window.scrollTo(0,0)}
  const run=async(task:()=>Promise<void>)=>{if(busy)return;setBusy(true);try{await task()}catch(e){announce(e)}finally{setBusy(false)}}
@@ -221,8 +221,8 @@ function App(){
    </>}
    {page==='Сканер'&&<>
     <div className="intro"><div><div className="eyebrow"><span/> КАТАЛОГ ПОДАРКОВ</div><h1>Поиск подарков</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':'Актуальные предложения Portals по вашим фильтрам.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Фильтры</button></div>
-    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput)}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('')}}><X size={15}/></button>}<button type="submit" className="search-submit">Найти</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
-    <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Все</option><option>Portals</option><option>MRKT</option></select></Field>
+    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput);if(!isDemo)void run(()=>catalogFeed(searchInput))}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('');if(!isDemo)void run(()=>catalogFeed())}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={busy}>{busy?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
+    <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Portals</option><option>Portals</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}
    </>}
    {page==='Портфель'&&<>
