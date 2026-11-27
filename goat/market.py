@@ -135,9 +135,11 @@ class Portals:
 
     async def listings(self):
         output = []
+        # Cheap listings first: these are the offers an arbitrage scanner must
+        # inspect before the newest (and often fairly priced) items.
         for offset in (0, 40, 80):
             result = await self.get("/nfts/search", status="listed", limit=40, offset=offset,
-                                    sort_by="listed_at desc")
+                                    sort_by="price asc")
             page = [self.listing(raw) for raw in result["results"] if raw["status"] == "listed"]
             output.extend(page)
             if len(result["results"]) < 40:
@@ -285,6 +287,11 @@ def candidates(listing, sales, listings, offer, fees, now):
     options = []
     if offer and (not listing.transferable_at or listing.transferable_at <= now):
         options.append(("instant", listing.market, offer.price, "active_offer"))
+    # Portals WebApp exposes live asks and their current floor, but not completed
+    # sales.  A below-floor listing is still a real, reproducible opportunity;
+    # calculate it from the source price and floor rather than inventing sales.
+    if listing.floor and listing.floor > listing.price:
+        options.append(("floor", listing.market, listing.floor, "potential"))
     for market in {sale.market for sale in same}:
         prices = sorted(sale.price for sale in same if sale.market == market)
         if len(prices) < 3 or market not in fees:
@@ -312,7 +319,8 @@ def candidates(listing, sales, listings, offer, fees, now):
             "transferable_at": listing.transferable_at, "offer_id": offer.id if strategy == "instant" else None,
             "history": [{"price": sale.price, "date": sale.sold_at, "market": sale.market}
                         for sale in sorted(same, key=lambda s: s.sold_at)[-30:]],
-            "risk": "Цена и доступность могут измениться. Выход зависит от ликвидности.",
+            "risk": ("Расчёт по текущему floor Portals с учётом комиссий. "
+                     "Цена может измениться, продажа по floor не гарантирована."),
         }))
     return result
 
