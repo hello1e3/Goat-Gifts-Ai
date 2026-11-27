@@ -109,6 +109,7 @@ function App(){
  const [showPrefs,setShowPrefs]=useState(false)
  const [advancedPrefs,setAdvancedPrefs]=useState(false)
  const [search,setSearch]=useState('')
+ const [searchInput,setSearchInput]=useState('')
  const [busy,setBusy]=useState(false)
  const [pendingVerify,setPendingVerify]=useState<string>()
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
@@ -220,7 +221,7 @@ function App(){
    </>}
    {page==='Сканер'&&<>
     <div className="intro"><div><div className="eyebrow"><span/> КАТАЛОГ ПОДАРКОВ</div><h1>Поиск подарков</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':'Актуальные предложения Portals по вашим фильтрам.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Фильтры</button></div>
-    <div className="panel filters"><Field label="Поиск подарка"><div className="search-box"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Название, номер, модель…"/><>{search&&<button type="button" aria-label="Очистить поиск" onClick={()=>setSearch('')}><X size={15}/></button>}</></div></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
+    <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput)}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('')}}><X size={15}/></button>}<button type="submit" className="search-submit">Найти</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
     <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Все</option><option>Portals</option><option>MRKT</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}
    </>}
