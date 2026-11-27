@@ -13,6 +13,7 @@ import httpx
 
 from goat.db import one, query, rows
 from goat.finance import Calculation, calculate
+from goat.valuation import FairValueEngine
 
 
 @dataclass(frozen=True)
@@ -64,52 +65,43 @@ class Offer:
 
 
 PORTALS_DEFAULT_FEES = {
-    "buy_fee": "0", "sell_fee": ".025", "transfer": "0",
+    "buy_fee": "0", "sell_fee": ".02", "transfer": "0",
     "network": "0", "conversion": "0", "extra_sell": "0",
 }
 
 
 def market_reference(listing, listings):
-    """Return a conservative active-ask reference without inventing sales."""
-    comparable = [item.price for item in listings
-                  if item.external_id != listing.external_id and item.market == listing.market
-                  and item.currency == listing.currency
-                  and item.gift.collection.casefold() == listing.gift.collection.casefold()
-                  and item.gift.model.casefold() == listing.gift.model.casefold()]
-    broad = [item.price for item in listings
-             if item.external_id != listing.external_id and item.market == listing.market
-             and item.currency == listing.currency
-             and item.gift.collection.casefold() == listing.gift.collection.casefold()]
-    peers = comparable if len(comparable) >= 3 else broad
-    references = []
-    if listing.floor and listing.floor > 0:
-        references.append((listing.floor, "floor Portals"))
-    if len(peers) >= 3:
-        prices = sorted(peers)
-        references.append((prices[(len(prices) - 1) // 4], "нижний квартиль активных лотов"))
-    if not references:
-        return listing.price, 0, "текущая цена"
-    price, basis = max(references, key=lambda item: item[0])
-    return price, len(peers), basis
+    estimate = FairValueEngine(listings).evaluate(listing)
+    return estimate['fair_value'], estimate['comparable_asks'], estimate['reference_basis']
 
 
-def listing_analysis(listing, listings, fees=None, target_roi=Decimal("5")):
-    target, liquidity, basis = market_reference(listing, listings)
-    settings = {**PORTALS_DEFAULT_FEES, **(fees or {})}
-    calc = calculate(Calculation(
-        buy=listing.price, sell=target, currency=listing.currency,
-        buy_fee=settings["buy_fee"], sell_fee=settings["sell_fee"],
-        transfer=settings["transfer"], network=settings["network"],
-        conversion=settings["conversion"], extra_sell=settings["extra_sell"],
-        target_roi=target_roi, conservative_sell=target * Decimal(".95"),
-    ))
+def listing_analysis(listing, listings, fees=None, target_roi=Decimal("5"), sales=(), engine=None):
+    estimate = (engine or FairValueEngine(listings, sales)).evaluate(listing)
+    target = estimate['fair_value']
+    calc = dict.fromkeys(('cost', 'proceeds', 'profit', 'roi', 'break_even', 'max_buy',
+                         'conservative_profit', 'optimistic_profit', 'buy_commission',
+                         'sell_commission', 'transfer', 'fx_impact'))
+    if fees is not None:
+        parameters = dict(buy=listing.price, sell=target or 0, currency=listing.currency,
+                          **{key: fees[key] for key in PORTALS_DEFAULT_FEES}, target_roi=target_roi,
+                          conservative_sell=estimate['conservative_sale'])
+        computed = calculate(Calculation(**parameters))
+        if target is not None:
+            calc.update(computed)
+            parameters['sell'] = estimate['optimistic_sale']
+            calc['optimistic_profit'] = calculate(Calculation(**parameters))['profit']
+        else:
+            for key in ('cost', 'buy_commission', 'transfer', 'break_even'):
+                calc[key] = computed[key]
     return {
-        **asdict(listing.gift), **calc, "floor": listing.floor,
+        **asdict(listing.gift), **calc, **estimate, "floor": listing.floor,
+        'currency': listing.currency, 'fees_configured': fees is not None,
+        'listing_id': listing.external_id,
         "purchase": listing.price, "sale": target, "market": listing.market,
-        "exit_market": listing.market, "url": listing.url, "liquidity": liquidity,
-        "transferable_at": listing.transferable_at, "history": [], "reference_basis": basis,
-        "risk": (f"Оценка выхода: {basis}. Учтены комиссии и запас 5%. "
-                 "Лот и рыночные цены могут измениться; прибыль не гарантирована."),
+        "exit_market": listing.market, "url": listing.url,
+        "transferable_at": listing.transferable_at, "history": [],
+        "risk": estimate['reference_basis'] + ('. Комиссии не настроены.' if fees is None else
+                 '. Сценарии основаны на распределении цен аналогов; срок продажи неизвестен.'),
     }
 
 
@@ -149,8 +141,28 @@ class Portals:
         self.token = token
         self.webapp = token.startswith("tma ")
         self.next_call = 0.0
+        self.lock = asyncio.Lock()
+        self.scan_offset = 0
+        self.scan_complete = False
+        self.api_errors = 0
+        self.sales_offset = 0
 
     async def get(self, path, **params):
+        async with self.lock:
+            for attempt in range(3):
+                try:
+                    return await self._get(path, **params)
+                except httpx.HTTPStatusError as exc:
+                    if attempt == 2 or exc.response.status_code not in (429,500,502,503,504):
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+                except httpx.TransportError:
+                    self.api_errors += 1
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+
+    async def _get(self, path, **params):
         clock = asyncio.get_running_loop().time
         await asyncio.sleep(max(0, self.next_call - clock()))
         base = "https://portal-market.com/api" if self.webapp else "https://portal-market.com/partners"
@@ -158,9 +170,14 @@ class Portals:
         response = await self.client.get(base + path, params=params, headers={
             "Authorization": authorization, "User-Agent": "GOAT-NFT/1.0",
         })
-        reset = response.headers.get("X-RateLimit-Reset", "0")
-        pause = max(1.1, float(reset) if reset.isdecimal() and response.status_code == 429 else 0)
+        reset = response.headers.get('Retry-After',response.headers.get("X-RateLimit-Reset", "0"))
+        try:
+            pause = max(1.1,min(float(reset),60)) if response.status_code == 429 else 1.1
+        except ValueError:
+            pause = 2
         self.next_call = clock() + pause
+        if response.is_error:
+            self.api_errors += 1
         response.raise_for_status()
         return response.json(parse_float=Decimal)
 
@@ -187,19 +204,23 @@ class Portals:
 
     async def listings(self):
         output = {}
-        # Combine cheap asks with fresh listings. A price-only feed gets stuck
-        # on a few low-floor collections and misses new underpriced gifts.
-        for ordering, offsets in (("price asc", range(0, 200, 20)),
-                                  ("listed_at desc", range(0, 100, 20))):
-            for offset in offsets:
-                result = await self.get("/nfts/search", status="listed", limit=20, offset=offset,
-                                        sort_by=ordering)
-                for raw in result.get("results", []):
-                    if raw.get("status") == "listed":
-                        item = self.listing(raw)
-                        output[item.external_id] = item
-                if not result.get("results"):
-                    break
+        # Bounded work per cycle, unlimited cursor progression across cycles.
+        # The market moves during offset pagination: coverage is not a snapshot.
+        self.scan_complete = False
+        for offset in dict.fromkeys((0, self.scan_offset)):
+            result = await self.get('/nfts/search', status='listed', limit=100,
+                                    offset=offset, sort_by='listed_at desc')
+            page = result.get('results', [])
+            for raw in page:
+                if raw.get('status') == 'listed':
+                    item = self.listing(raw)
+                    output[item.external_id] = item
+            if offset == self.scan_offset:
+                if not page:
+                    self.scan_complete = True
+                    self.scan_offset = 0
+                else:
+                    self.scan_offset += len(page)
         return list(output.values())
 
     async def search(self, text, offset=0, limit=60):
@@ -221,7 +242,9 @@ class Portals:
         if self.webapp:
             # The reverse-engineered WebApp contract documents listings only.
             return []
-        result = await self.get("/market/actions/", action_types="purchase", limit=20)
+        result = await self.get("/market/actions/", action_types="purchase", limit=20,
+                                offset=self.sales_offset,period='one_month')
+        self.sales_offset = (self.sales_offset + len(result['actions'])) if result['actions'] and self.sales_offset < 700 else 0
         output = []
         for raw in result["actions"]:
             if raw["type"] == "purchase":
@@ -350,54 +373,27 @@ class MRKT:
         return None
 
 
-def candidates(listing, sales, listings, offer, fees, now):
+def candidates(listing, sales, listings, offer, fees, now, engine=None):
     if listing.market not in fees:
         return []
-    same = [sale for sale in sales if sale.currency == listing.currency
-            and sale.gift.comparable == listing.gift.comparable and sale.sold_at >= now - timedelta(days=30)]
-    options = []
-    if offer and (not listing.transferable_at or listing.transferable_at <= now):
-        options.append(("instant", listing.market, offer.price, "active_offer"))
-    # Portals WebApp exposes live asks and their current floor, but not completed
-    # sales.  A below-floor listing is still a real, reproducible opportunity;
-    # calculate it from the source price and floor rather than inventing sales.
-    reference, peer_liquidity, _ = market_reference(listing, listings)
-    if reference > listing.price:
-        options.append(("floor", listing.market, reference, "potential"))
-    for market in {sale.market for sale in same}:
-        prices = sorted(sale.price for sale in same if sale.market == market)
-        if len(prices) < 3 or market not in fees:
-            continue
-        conservative = prices[(len(prices) - 1) // 4]
-        if market == listing.market:
-            options.append(("floor", market, min(conservative, listing.floor or conservative), "potential"))
-        elif listing.transferable_at and listing.transferable_at <= now:
-            asks = [item.price for item in listings if item.market == market and item.currency == listing.currency
-                    and item.gift.comparable == listing.gift.comparable]
-            if asks:
-                options.append(("cross", market, min(conservative, min(asks)), "risky"))
+    details = listing_analysis(listing, listings, fees[listing.market], sales=sales, engine=engine)
     result = []
-    for strategy, exit_market, target, state in options:
-        buy, sell = fees[listing.market], fees[exit_market]
-        calc = calculate(Calculation(
-            buy=listing.price, sell=target, currency=listing.currency, buy_fee=buy["buy_fee"],
-            sell_fee=sell["sell_fee"], transfer=buy["transfer"] if exit_market != listing.market else 0,
-            network=buy["network"], conversion=buy["conversion"], extra_sell=sell["extra_sell"],
-            conservative_sell=target * Decimal(".95")))
-        if calc["roi"] < 5 or calc["conservative_profit"] <= 0:
-            continue
-        result.append((strategy, state, {
-            **asdict(listing.gift), **calc, "floor": listing.floor, "purchase": listing.price, "sale": target,
-            "market": listing.market, "exit_market": exit_market, "url": listing.url,
-            "liquidity": max(len(same), peer_liquidity),
-            "transferable_at": listing.transferable_at, "offer_id": offer.id if strategy == "instant" else None,
-            "history": [{"price": sale.price, "date": sale.sold_at, "market": sale.market}
-                        for sale in sorted(same, key=lambda s: s.sold_at)[-30:]],
-            "risk": ("Расчёт по текущему floor Portals с учётом комиссий. "
-                     "Цена может измениться, продажа по floor не гарантирована."),
-        }))
+    if (details['evidence'] == 'sales' and details['profit'] is not None
+            and details['profit'] > 0 and details['conservative_profit'] > 0):
+        result.append(('floor', 'potential', details))
+    if offer and (not listing.transferable_at or listing.transferable_at <= now):
+        settings = fees[listing.market]
+        calc = calculate(Calculation(buy=listing.price, sell=offer.price, currency=listing.currency,
+                         **{key: settings[key] for key in PORTALS_DEFAULT_FEES},
+                         conservative_sell=offer.price))
+        if calc['profit'] > 0:
+            result.append(('instant', 'active_offer', {
+                **details, **calc, 'sale': offer.price, 'offer_id': offer.id,
+                'reference_basis': 'Действующее предложение покупки',
+                'risk': 'Офер может быть исполнен другим продавцом до вашей сделки.',
+                'confidence': 'high', 'evidence': 'offer',
+            }))
     return result
-
 
 async def health(conn, component, status):
     await query(conn, """insert into system_health(component,status) values(:c,:s)
@@ -427,15 +423,30 @@ async def scan(db, adapters, status):
         fees = {row["market"]: row["fees"] for row in fee_rows}
         for adapter in adapters:
             try:
+                if isinstance(adapter, Portals):
+                    async with db.transaction() as conn:
+                        cursor = await one(conn, "select value from system_settings where key='portals_cursor'")
+                    if cursor:
+                        adapter.scan_offset = int(cursor['value']['offset'])
                 listed = await adapter.listings()
-                sold = await adapter.sales()
             except (httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError):
                 async with db.transaction() as conn:
                     await health(conn, adapter.name, "unavailable")
                 continue
+            try:
+                sold = await adapter.sales()
+                sales_status = 'not_supported' if getattr(adapter,'webapp',False) else 'online'
+            except (httpx.HTTPError,ValueError,KeyError,TypeError,ArithmeticError):
+                sold = []
+                sales_status = 'unavailable'
             current.extend(listed)
             async with db.transaction() as conn:
                 await health(conn, adapter.name, "online")
+                await health(conn, adapter.name+':sales',sales_status)
+                if isinstance(adapter, Portals):
+                    await query(conn, """insert into system_settings(key,value) values('portals_cursor',cast(:v as jsonb))
+                        on conflict(key) do update set value=excluded.value""",
+                        v=json.dumps({'offset':adapter.scan_offset}))
                 for sale in sold:
                     await store_gift(conn, sale.gift)
                     await query(conn, """insert into market_sales values(:m,:e,:g,:p,:c,:s)
@@ -458,29 +469,37 @@ async def scan(db, adapters, status):
             persisted = await rows(conn, """
               select g.*,s.market,s.external_id,s.price,s.currency,s.sold_at from market_sales s
               join gifts g on g.id=s.gift_id where s.sold_at>now()-interval '30 days'
-              order by s.sold_at desc limit 10000
+              order by s.sold_at desc
             """)
         for row in persisted:
             gift = Gift(**{field: row[field] for field in Gift.__dataclass_fields__})
             sales_data.append(Sale(row["market"], row["external_id"], gift, row["price"], row["currency"], row["sold_at"]))
         by_name = {adapter.name: adapter for adapter in adapters}
-        ranked = sorted(current, key=lambda item: (
-            (market_reference(item, current)[0] - item.price) / item.price,
-            -item.price), reverse=True)
-        selected, collections = [], set()
-        for item in ranked:
-            key = item.gift.collection.casefold()
-            if key not in collections:
-                selected.append(item)
-                collections.add(key)
-            if len(selected) >= 20:
-                break
-        for item in ranked:
-            if item not in selected:
-                selected.append(item)
-            if len(selected) >= 30:
-                break
-        for listing in selected:
+        async with db.transaction() as conn:
+            peer_rows = await rows(conn, """select g.*, l.market,l.external_id,l.price,l.currency,
+                l.url,l.transferable_at,l.floor from market_listings l join gifts g on g.id=l.gift_id
+                where l.active and l.observed_at>now()-interval '15 minutes'""")
+        peers = [Listing(row['market'], row['external_id'],
+                 Gift(**{field: row[field] for field in Gift.__dataclass_fields__}),
+                 row['price'],row['currency'],row['url'],row['transferable_at'],row['floor'])
+                 for row in peer_rows]
+        engine = FairValueEngine(peers, sales_data)
+        diagnostics = {'analyzed': len(current), 'profitable': 0, 'insufficient': 0,
+                       'asks_only': 0, 'fees_missing': 0, 'non_positive': 0,
+                       'collections_in_batch': len({item.gift.collection for item in current})}
+        for listing in current:
+            details = listing_analysis(listing, peers, fees.get(listing.market), engine=engine)
+            diagnostics['insufficient'] += int(details['evidence'] == 'none')
+            diagnostics['asks_only'] += int(details['evidence'] == 'asks')
+            diagnostics['fees_missing'] += int(not details['fees_configured'])
+            diagnostics['non_positive'] += int(details['profit'] is not None and details['profit'] <= 0)
+            async with db.transaction() as conn:
+                await query(conn, """insert into market_analysis(market,external_id,details)
+                    values(:m,:e,cast(:d as jsonb)) on conflict(market,external_id) do update
+                    set details=excluded.details,observed_at=now()""",
+                    m=listing.market,e=listing.external_id,d=json.dumps(details,default=str))
+                await query(conn, """update trading_signals set state='stale'
+                    where listing_market=:m and listing_id=:e""",m=listing.market,e=listing.external_id)
             if listing.market not in fees:
                 continue
             adapter = by_name[listing.market]
@@ -492,7 +511,7 @@ async def scan(db, adapters, status):
                             insert into market_offers values(:m,:id,cast(:d as jsonb),now())
                             on conflict(market,external_id) do update set details=excluded.details,observed_at=now()
                         """, m=listing.market,id=offer.id,d=json.dumps(asdict(offer),default=str))
-                options = candidates(listing, sales_data, current, offer, fees, now)
+                options = candidates(listing, sales_data, peers, offer, fees, now, engine=engine)
                 if not options:
                     continue
                 found = await adapter.get_listing(listing.external_id)
@@ -505,6 +524,7 @@ async def scan(db, adapters, status):
                     """, state="unavailable" if found is None else "stale", m=listing.market, id=listing.external_id)
                     continue
                 for strategy, state, details in options:
+                    diagnostics['profitable'] += 1
                     identity = sha256(f"{listing.market}/{listing.external_id}/{strategy}/{details['exit_market']}".encode()).hexdigest()
                     await query(conn, """
                         insert into trading_signals values(:id,:m,:listing,:strategy,cast(:d as jsonb),:state,now())
@@ -512,6 +532,13 @@ async def scan(db, adapters, status):
                     """, id=identity, m=listing.market, listing=listing.external_id, strategy=strategy,
                                 d=json.dumps(details, default=str, ensure_ascii=False), state=state)
         async with db.transaction() as conn:
+            diagnostics['updated_at'] = datetime.now(UTC).isoformat()
+            diagnostics['duration_seconds'] = (datetime.now(UTC) - now).total_seconds()
+            diagnostics['sources'] = {a.name: {'offset': getattr(a,'scan_offset',None),
+                'reached_end': getattr(a,'scan_complete',False), 'api_errors': getattr(a,'api_errors',0)}
+                for a in adapters}
+            await query(conn, """insert into system_settings(key,value) values('market_diagnostics',cast(:v as jsonb))
+                on conflict(key) do update set value=excluded.value""",v=json.dumps(diagnostics))
             await query(conn, """update trading_signals set state='stale'
                 where state in ('active_offer','potential','risky') and observed_at<now()-interval '3 minutes'""")
 

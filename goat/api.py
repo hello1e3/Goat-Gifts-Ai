@@ -96,7 +96,7 @@ def create_api(db, config, lifespan):
 
     @app.get("/api/demo")
     async def demonstration():
-        return demo()
+        return []  # Production does not publish synthetic prices or trades.
 
     @app.get("/api/market-status")
     async def market_status():
@@ -149,40 +149,121 @@ def create_api(db, config, lifespan):
             return await signals(conn, Preferences.model_validate(access["prefs"]), history=past)
 
     @app.get("/api/catalog")
-    async def gifts_catalog(uid: User, q: str = "", offset: int = 0, limit: int = 60):
-        offset = max(0, min(offset, 10_000))
-        limit = max(1, min(limit, 100))
+    async def gifts_catalog(uid: User, q: str = "", offset: int = 0, limit: int = 60, session: str = ''):
+        from uuid import UUID, uuid4
+        offset, limit = max(0, offset), max(1, min(limit, 100))
+        q = q.strip()[:80]
         async with db.transaction() as conn:
             await require_access(conn, uid)
-            cached = await catalog(conn, q, offset, limit)
-            portals_fees = await scalar(conn, "select fees from marketplace_fees where market='Portals'")
-        if config.portals_api_key:
-            try:
-                async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                    listings = await Portals(client, config.portals_api_key).search(q, offset, limit)
-                return [{
-                    "id": f"catalog:{item.market}:{item.external_id}", "strategy": "floor",
-                    "state": "listed", "observed_at": datetime.now(UTC),
-                    "details": listing_analysis(item, listings, portals_fees or PORTALS_DEFAULT_FEES),
-                } for item in listings]
-            except (httpx.HTTPError, ValueError, KeyError, TypeError, ArithmeticError):
-                pass
-        return cached
+            await query(conn,"delete from catalog_sessions where expires_at<now()")
+            saved = await one(conn,"select * from catalog_sessions where id=:s and user_id=:u and search=:q",
+                              s=UUID(session),u=uid,q=q) if session else None
+            if session and not saved:
+                raise HTTPException(409,'Поиск устарел. Нажмите «Найти», чтобы обновить результаты.')
+            if not saved:
+                ids = [row['external_id'] for row in await rows(conn,"""select l.external_id
+                    from market_listings l join gifts g on g.id=l.gift_id
+                    join market_analysis a using(market,external_id)
+                    where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
+                    and (:q='' or concat_ws(' ',g.title,g.collection,g.model,g.backdrop,g.symbol,g.number)
+                    ilike '%'||:q||'%') order by l.external_id""",q=q)]
+                session = str(uuid4())
+                await query(conn,"""insert into catalog_sessions values(:s,:u,:q,cast(:ids as jsonb),now()+interval '10 minutes')""",
+                            s=UUID(session),u=uid,q=q,ids=json.dumps(ids))
+            else:
+                ids = saved['ids']
+            cached = await rows(conn,"""select 'catalog:'||l.market||':'||l.external_id as id,
+                'floor' as strategy,case when l.active then 'listed' else 'unavailable' end as state,
+                l.observed_at,a.details from market_listings l join market_analysis a using(market,external_id)
+                where l.market='Portals' and l.external_id=any(cast(:ids as text[])) order by l.external_id""",
+                ids=ids[offset:offset+limit])
+            diagnostic = await scalar(conn, "select value from system_settings where key='market_diagnostics'")
+        return {'items': cached, 'has_more': offset+limit < len(ids), 'total':len(ids),'session':session,
+                'offset': offset, 'coverage': diagnostic, 'source': 'background_cache'}
+
+    @app.get('/api/nearby')
+    async def nearby(uid: User):
+        async with db.transaction() as conn:
+            access = await require_access(conn,uid)
+            prefs = Preferences.model_validate(access['prefs'])
+            return await rows(conn,"""select 'catalog:'||l.market||':'||l.external_id as id,
+                'floor' as strategy,'watch' as state,l.observed_at,a.details
+                from market_listings l join market_analysis a using(market,external_id)
+                where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
+                and (a.details->>'cost')::numeric<=:budget
+                and not exists(select 1 from trading_signals t where t.listing_market=l.market
+                    and t.listing_id=l.external_id and t.state in ('potential','active_offer')
+                    and t.observed_at>now()-interval '3 minutes')
+                order by (a.details->>'roi')::numeric desc nulls last,l.external_id limit 20""",
+                budget=prefs.budget)
+
+    async def resolve_listing(conn, id_):
+        if id_.startswith('catalog:Portals:'):
+            from uuid import UUID
+            return 'Portals', str(UUID(id_.split(':',2)[2]))
+        item = await one(conn, "select listing_market,listing_id from trading_signals where id=:id",id=id_)
+        if not item:
+            raise HTTPException(404, "Идентификатор предложения неизвестен")
+        return item['listing_market'], item['listing_id']
 
     @app.post("/api/signals/{id_}/verify")
     async def verify(uid: User, id_: str):
         async with db.transaction() as conn:
             await require_access(conn, uid)
-            item = await one(conn, "select * from trading_signals where id=:id", id=id_)
-            if not item:
-                raise HTTPException(404, "Сигнал не найден")
-            await query(conn, """
-                insert into system_settings(key,value) values(:key,jsonb_build_object('status','queued','checked_at',now()))
-                on conflict(key) do update set value=excluded.value
-                where system_settings.value->>'status'<>'queued'
-                  and (system_settings.value->>'checked_at')::timestamptz<now()-interval '10 seconds'
-            """, key=f"verify:{id_}")
-        return {"status": "queued", "last_observation": item["observed_at"]}
+            market, external_id = await resolve_listing(conn,id_)
+            fee = await scalar(conn,"select fees from marketplace_fees where market=:m",m=market)
+            peers = await rows(conn, """select g.*,l.market,l.external_id,l.price,l.currency,l.url,
+                l.transferable_at,l.floor from market_listings l join gifts g on g.id=l.gift_id
+                where l.market=:m and l.active and l.observed_at>now()-interval '15 minutes'""",m=market)
+        adapter = getattr(app.state,'market_adapters',{}).get(market)
+        if not adapter:
+            raise HTTPException(503, "Источник не подключён")
+        try:
+            import asyncio
+            listing = await asyncio.wait_for(adapter.get_listing(external_id), timeout=12)
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError):
+            raise HTTPException(503, "Не удалось связаться с Portals. Попробуйте позже.")
+        if listing is None:
+            async with db.transaction() as conn:
+                await query(conn,"update market_listings set active=false where market=:m and external_id=:e",m=market,e=external_id)
+                await query(conn,"update trading_signals set state='unavailable' where listing_market=:m and listing_id=:e",m=market,e=external_id)
+            return {'status':'unavailable','message':'Лот продан или снят с продажи'}
+        from goat.market import Gift, Listing, Sale, store_gift
+        pool = [Listing(row['market'],row['external_id'],
+                Gift(**{k:row[k] for k in Gift.__dataclass_fields__}),row['price'],row['currency'],
+                row['url'],row['transferable_at'],row['floor']) for row in peers]
+        async with db.transaction() as conn:
+            sold = await rows(conn,"""select g.*,s.market,s.external_id,s.price,s.currency,s.sold_at
+                from market_sales s join gifts g on g.id=s.gift_id
+                where s.market=:m and s.sold_at>now()-interval '30 days' and g.collection=:c""",
+                m=market,c=listing.gift.collection)
+        sales = [Sale(row['market'],row['external_id'],Gift(**{k:row[k] for k in Gift.__dataclass_fields__}),
+                      row['price'],row['currency'],row['sold_at']) for row in sold]
+        details = listing_analysis(listing,pool,fee,sales=sales)
+        async with db.transaction() as conn:
+            await store_gift(conn,listing.gift)
+            await query(conn,"""update market_listings set price=:p,observed_at=now(),active=true
+                where market=:m and external_id=:e""",p=listing.price,m=market,e=external_id)
+            await query(conn,"""insert into market_analysis(market,external_id,details)
+                values(:m,:e,cast(:d as jsonb)) on conflict(market,external_id)
+                do update set details=excluded.details,observed_at=now()""",
+                m=market,e=external_id,d=json.dumps(details,default=str))
+            await query(conn,"update trading_signals set state='stale' where listing_market=:m and listing_id=:e",
+                        m=market,e=external_id)
+        return {'status':'available','item':{'id':f'catalog:{market}:{external_id}',
+                'strategy':'floor','state':'listed','observed_at':datetime.now(UTC),'details':details}}
+
+    @app.get('/api/admin/diagnostics')
+    async def diagnostics(uid: User):
+        if uid not in config.admins:
+            raise HTTPException(403, 'Доступ запрещён')
+        async with db.transaction() as conn:
+            data = await scalar(conn,"select value from system_settings where key='market_diagnostics'") or {}
+            data['unique_lots'] = await scalar(conn,"select count(*) from market_listings")
+            data['collections_seen'] = await scalar(conn,"select count(distinct collection) from gifts")
+            data['fresh_lots'] = await scalar(conn,"select count(*) from market_listings where active and observed_at>now()-interval '15 minutes'")
+            data['tasks'] = await rows(conn,"select * from system_health")
+        return data
 
     @app.get("/api/signals/{id_}/verification")
     async def verification(uid: User, id_: str):
@@ -196,6 +277,13 @@ def create_api(db, config, lifespan):
         async with db.transaction() as conn:
             return await portfolios(conn, uid)
 
+    @app.get('/api/portfolio/history')
+    async def portfolio_history(uid: User):
+        async with db.transaction() as conn:
+            return await rows(conn,"""select t.*,i.title,i.currency,p.virtual from portfolio_transactions t
+                join portfolio_items i on i.id=t.item_id join portfolios p on p.id=i.portfolio_id
+                where p.user_id=:uid order by t.created_at desc,t.id desc""",uid=uid)
+
     @app.post("/api/portfolio", status_code=201)
     async def add(uid: User, item: PortfolioInput):
         async with db.transaction() as conn:
@@ -208,14 +296,21 @@ def create_api(db, config, lifespan):
                 item = next((entry for entry in demo() if entry["id"] == id_), None)
             else:
                 await require_access(conn, uid)
-                item = await one(conn, """
+                if id_.startswith('catalog:'):
+                    market, external_id = await resolve_listing(conn,id_)
+                    item = await one(conn,"""select a.details from market_analysis a
+                        join market_listings l using(market,external_id)
+                        where a.market=:m and a.external_id=:e and l.active
+                        and l.observed_at>now()-interval '15 minutes'""",m=market,e=external_id)
+                else:
+                    item = await one(conn, """
                     select * from trading_signals where id=:id and observed_at>now()-interval '3 minutes'
                        and state in ('active_offer','potential','risky')
                 """, id=id_)
             if not item:
                 raise HTTPException(404, "Актуальный сигнал не найден")
             d = item["details"]
-            data = PortfolioInput(title=d["title"], cost=d["cost"], currency=d["currency"], virtual=virtual)
+            data = PortfolioInput(title=d["title"], cost=d.get("cost") or d['purchase'], currency=d["currency"], virtual=virtual)
             simulation = {"id": id_, "proceeds": d["proceeds"], "liquidity": d["liquidity"]} if virtual else None
             return {"id": await add_item(conn, uid, data, None if virtual else d["id"], simulation)}
 
@@ -223,6 +318,26 @@ def create_api(db, config, lifespan):
     async def close(uid: User, id_: int, data: CloseInput):
         async with db.transaction() as conn:
             await close_item(conn, uid, id_, data.proceeds)
+
+    @app.patch('/api/portfolio/{id_}', status_code=204)
+    async def edit_position(uid: User, id_: int, data: PortfolioInput):
+        async with db.transaction() as conn:
+            item = await one(conn,"""update portfolio_items i set title=:title,cost=:cost
+                from portfolios p where i.portfolio_id=p.id and p.user_id=:uid and i.id=:id
+                and i.sold_at is null and i.currency=:currency returning i.id""",
+                uid=uid,id=id_,title=data.title,cost=data.cost,currency=data.currency)
+            if not item:
+                raise HTTPException(404,'Открытая позиция не найдена')
+            await query(conn,"insert into portfolio_transactions(item_id,kind,amount) values(:id,'cost_correction',:v)",
+                        id=id_,v=data.cost)
+
+    @app.delete('/api/portfolio/{id_}', status_code=204)
+    async def delete_position(uid: User, id_: int):
+        async with db.transaction() as conn:
+            item = await one(conn,"""delete from portfolio_items i using portfolios p
+                where i.portfolio_id=p.id and p.user_id=:uid and i.id=:id returning i.id""",uid=uid,id=id_)
+            if not item:
+                raise HTTPException(404,'Позиция не найдена')
 
     @app.get("/api/admin/statistics")
     async def stats(uid: User, days: int = 30, format: str = "json"):

@@ -18,7 +18,7 @@ async def init_plan(conn, config):
         insert into subscription_plans(id,description,price,approval)
         values(:id,'30 дней доступа к GOAT Gifts AI',:price,:approval) on conflict do nothing
     """, id=PLAN, price=config.default_subscription_price_xtr, approval=config.purchase_approval_required)
-    base = config.default_subscription_price_xtr
+    base = await scalar(conn, 'select price from subscription_plans where id=:id', id=PLAN)
     for days, (plan_id, multiplier) in PLAN_TERMS.items():
         if days == 30:
             continue
@@ -121,8 +121,9 @@ async def card_request(conn, uid, amount=None, duration_seconds=30 * DAY):
         raise ValueError("Оплата переводом сейчас недоступна")
     existing = await one(conn, """
         select * from manual_payments where user_id=:uid and status='pending'
+        and duration_seconds=:duration
         order by created_at desc limit 1
-    """, uid=uid)
+    """, uid=uid,duration=duration_seconds)
     if existing:
         return existing
     return await one(conn, """

@@ -96,7 +96,7 @@ async def deliver(bot, conn, entry, app_url):
                 f"💰 Чистая выручка: {Decimal(d['proceeds']):.2f} {d['currency']}\n"
                 f"📈 Расчётная прибыль: +{Decimal(d['profit']):.2f} {d['currency']}\n"
                 f"🚀 ROI: +{Decimal(d['roi']):.2f}%\n"
-                f"🛡 После запаса 5%: {Decimal(d['conservative_profit']):+.2f} {d['currency']}\n\n"
+                f"🛡 Консервативный сценарий: {Decimal(d['conservative_profit']):+.2f} {d['currency']}\n\n"
                 f"⚠️ {d['risk']}")
         data = {"text": text, "emoji": "gift"}
         if isinstance(d.get("image"), str) and d["image"].startswith("https://"):

@@ -220,7 +220,7 @@ async def test_portfolios_api_isolation_and_role(db):
         assert (await client.get("/api/signals", headers=a)).status_code == 403
         assert (await client.get("/api/admin/statistics", headers=a)).status_code == 403
         assert (await client.get("/api/admin/statistics?format=csv", headers=admin)).status_code == 200
-        assert (await client.get("/api/demo")).json()[0]["state"] == "demo"
+        assert (await client.get("/api/demo")).json() == []
         item = await client.post("/api/portfolio", headers=a, json={"title": "TEST gift", "cost": "8"})
         assert item.status_code == 201
         id_ = item.json()["id"]
@@ -244,8 +244,8 @@ def test_strategies_comparability_and_restrictions():
     fees = {m: dict(buy_fee="0", sell_fee=".01", transfer=".2", network="0", conversion="0", extra_sell="0")
             for m in ("Portals", "MRKT")}
     result = candidates(buy, history, [alternative], Offer("1", Decimal(12)), fees, now)
-    assert {r[0] for r in result} == {"instant", "floor", "cross"}
-    assert all(r[2]["liquidity"] == 6 for r in result)
+    assert {r[0] for r in result} == {"instant", "floor"}
+    assert all(r[2]["liquidity"] == 3 for r in result)
     locked = Listing("Portals", "3", gift, Decimal(10), "GRAM", None, now+timedelta(days=1))
     assert {r[0] for r in candidates(locked, history, [alternative], Offer("1", Decimal(12)), fees, now)} == {"floor"}
 
@@ -258,24 +258,21 @@ def test_live_floor_discount_produces_real_calculated_profit_without_sales():
     fees = {"Portals": dict(buy_fee=".01", sell_fee=".02", transfer="0", network="0",
                              conversion="0", extra_sell="0")}
     result = candidates(listing, [], [listing], None, fees, now)
-    assert len(result) == 1 and result[0][0] == "floor"
-    details = result[0][2]
-    assert details["purchase"] == Decimal("8")
-    assert details["sale"] == Decimal("10")
-    assert details["profit"] == Decimal("1.72")
-    assert details["roi"] > 20
+    assert result == []  # A collection floor is not evidence of resale value.
 
 
 def test_catalog_analysis_uses_real_peer_reference_and_fees():
-    gift = Gift("cheap-1", "Cheap", 1, "Cheap", "Model", "Back", "Sym", None, None)
+    from dataclasses import replace
+    gift = Gift("cheap-154", "Cheap", 154, "Cheap", "Model", "Back", "Sym", None, None)
     cheap = Listing("Portals", "cheap", gift, Decimal("5"), "GRAM", "https://t.me/portals/market", None)
-    peers = [cheap] + [Listing("Portals", str(index), gift, Decimal(price), "GRAM", None, None)
+    peers = [cheap] + [Listing("Portals", str(index), replace(gift,id=f'cheap-{154+index}',number=154+index), Decimal(price), "GRAM", None, None)
                        for index, price in enumerate(("8", "9", "10", "11"), 1)]
-    details = listing_analysis(cheap, peers)
-    assert details["reference_basis"] == "нижний квартиль активных лотов"
-    assert details["sale"] == Decimal("8")
-    assert details["sell_commission"] == Decimal(".200")
-    assert details["profit"] == Decimal("2.800")
+    fees = dict(buy_fee='0',sell_fee='.025',transfer='0',network='0',conversion='0',extra_sell='0')
+    details = listing_analysis(cheap, peers, fees)
+    assert details['evidence'] == 'asks' and details['liquidity'] == 0
+    assert details["sale"] == Decimal("9")
+    assert details["sell_commission"] == Decimal(".225")
+    assert details["profit"] == Decimal("3.775")
     assert details["conservative_profit"] > 0
 
 
@@ -412,6 +409,7 @@ async def test_portals_contract_scan_and_verify(db):
         await query(conn, """
             insert into marketplace_fees(market,fees) values('Portals',
             '{"buy_fee":"0","sell_fee":".01","transfer":"0","network":"0","conversion":"0","extra_sell":"0"}')
+            on conflict(market) do update set fees=excluded.fees
         """)
         await query(conn, "insert into currency_rates values('GRAM','TON',now(),.5,'synthetic')")
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:

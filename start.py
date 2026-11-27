@@ -57,6 +57,7 @@ async def lifespan(app):
             status["Portals"] = "license_required"
         else:
             adapters.append(Portals(client, config.portals_api_key))
+        app.state.market_adapters = {adapter.name: adapter for adapter in adapters}
         try:
             if bot and config.run_background:
                 await bot.set_my_commands([BotCommand(command=cmd, description=label) for cmd, label in (
@@ -96,7 +97,7 @@ async def lifespan(app):
                                                     text=stats_text(data), emoji="chart")
 
             if config.run_background:
-                tasks.append(asyncio.create_task(loop(30, lambda: scan(db, adapters, status))))
+                tasks.append(asyncio.create_task(loop(3, lambda: scan(db, adapters, status))))
                 tasks.append(asyncio.create_task(loop(15, distribute)))
             yield
         finally:

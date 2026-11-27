@@ -13,7 +13,8 @@ from goat.market import Gift, Listing, PORTALS_DEFAULT_FEES, listing_analysis
 class Preferences(BaseModel):
     capital: Decimal = Field(default=Decimal(100), gt=0, le=1_000_000)
     roi: Decimal = Field(default=Decimal(5), ge=0, le=1000)
-    max_cost: Decimal = Field(default=Decimal(100), gt=0, le=1_000_000)
+    max_cost: Decimal = Field(default=Decimal(1_000_000), gt=0, le=1_000_000)
+    limit_per_gift: bool = False
     min_profit: Decimal = Field(default=Decimal(0), ge=0)
     collections: list[str] = Field(default_factory=list, max_length=30)
     markets: list[Literal["Portals", "MRKT"]] = Field(default_factory=list, max_length=2)
@@ -26,6 +27,10 @@ class Preferences(BaseModel):
     signals: bool = True
     marketing: bool = False
     reminders: bool = True
+
+    @property
+    def budget(self):
+        return min(self.capital,self.max_cost) if self.limit_per_gift else self.capital
 
 
 class PortfolioInput(BaseModel):
@@ -62,36 +67,24 @@ async def signals(conn, prefs: Preferences, history=False):
           and (cardinality(cast(:markets as text[]))=0 or listing_market=any(cast(:markets as text[])))
           and (cardinality(cast(:strategies as text[]))=0 or strategy=any(cast(:strategies as text[])))
           and (cardinality(cast(:collections as text[]))=0 or details->>'collection'=any(cast(:collections as text[])))
-        order by observed_at desc limit 100
+        order by (details->>'profit')::numeric desc, t.id
     """, age=prefs.max_age_seconds, roi=prefs.roi, liquidity=prefs.liquidity, profit=prefs.min_profit,
-        cost=min(prefs.capital, prefs.max_cost), markets=prefs.markets, strategies=prefs.strategies,
+        cost=prefs.budget, markets=prefs.markets, strategies=prefs.strategies,
         collections=prefs.collections)
 
 
 async def catalog(conn, search="", offset=0, limit=60):
-    query_text = search.strip()[:80]
-    entries = await rows(conn, """
-        select l.market,l.external_id,l.price,l.currency,l.url,l.transferable_at,l.observed_at,l.floor,
-               g.id,g.collection,g.number,g.title,g.model,g.backdrop,g.symbol,g.rarity,g.image
+    return await rows(conn, """
+        select 'catalog:'||l.market||':'||l.external_id as id,'floor' as strategy,
+               'listed' as state,l.observed_at,a.details
         from market_listings l join gifts g on g.id=l.gift_id
-        where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
-          and (:search='' or g.title ilike '%'||:search||'%' or g.collection ilike '%'||:search||'%'
-               or g.model ilike '%'||:search||'%' or g.backdrop ilike '%'||:search||'%'
-               or g.symbol ilike '%'||:search||'%' or cast(g.number as text)=:search)
-        order by l.observed_at desc,l.price asc limit :limit offset :offset
-    """, search=query_text, limit=limit, offset=offset)
-    fee = await scalar(conn, "select fees from marketplace_fees where market='Portals'")
-    listings = []
-    for row in entries:
-        gift = Gift(**{field: row[field] for field in Gift.__dataclass_fields__})
-        listings.append(Listing(row["market"], row["external_id"], gift, row["price"], row["currency"],
-                                row["url"], row["transferable_at"], row["floor"]))
-    return [{
-        "id": f"catalog:{row['market']}:{row['external_id']}", "strategy": "floor", "state": "listed",
-        "observed_at": row["observed_at"],
-        "details": listing_analysis(item, listings, fee or PORTALS_DEFAULT_FEES),
-    } for row, item in zip(entries, listings, strict=True)]
-
+        join market_analysis a on a.market=l.market and a.external_id=l.external_id
+        where l.market='Portals' and l.active
+          and l.observed_at>now()-interval '15 minutes'
+          and (:search='' or concat_ws(' ',g.title,g.collection,g.model,g.backdrop,g.symbol,g.number)
+               ilike '%'||:search||'%')
+        order by l.external_id limit :limit offset :offset
+    """,search=search.strip()[:80],limit=limit,offset=offset)
 
 def demo():
     dataset = [
@@ -121,15 +114,19 @@ def demo():
 
 async def portfolios(conn, uid):
     return await rows(conn, """
-        select i.*,p.virtual,t.available_at,t.scenario,v.estimate
+        select i.*,p.virtual,t.available_at,t.scenario,v.estimate,v.sale_min,v.sale_max,v.liquidity
         from portfolio_items i join portfolios p on p.id=i.portfolio_id
         left join paper_trades t on t.item_id=i.id
         left join lateral (
-          select percentile_disc(.25) within group(order by s.price) estimate
-          from market_sales s where s.gift_id=i.gift_id and s.currency=i.currency
-            and s.sold_at>now()-interval '30 days' having count(*)>=3
+          select (a.details->>'proceeds')::numeric as estimate,
+                 a.details->>'conservative_sale' as sale_min,a.details->>'optimistic_sale' as sale_max,
+                 a.details->>'liquidity' as liquidity
+          from market_analysis a join market_listings l using(market,external_id)
+          where l.gift_id=i.gift_id and l.currency=i.currency
+            and a.observed_at>now()-interval '15 minutes' and a.details->>'evidence'='sales'
+          order by a.observed_at desc limit 1
         ) v on true
-        where p.user_id=:uid order by i.id desc limit 200
+        where p.user_id=:uid order by i.id desc
     """, uid=uid)
 
 

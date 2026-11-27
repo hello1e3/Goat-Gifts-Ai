@@ -43,8 +43,9 @@ def calculate(p: Calculation):
         "break_even": (cost + p.extra_sell) / sell_factor,
         "max_buy": max(ZERO, ((proceeds / (ONE + p.target_roi / HUNDRED)) - fixed) / (ONE + p.buy_fee)),
         "conservative_profit": net(p.conservative_sell if p.conservative_sell is not None
-                                   else p.sell * Decimal(".95")) - cost,
+                                   else p.sell) - cost,
         "fx_impact": p.sell * sell_factor * p.fx_shock_pct / HUNDRED,
         "downside": {str(pct): net(p.sell * (ONE - Decimal(pct) / HUNDRED)) - cost
                      for pct in (5, 10, 20)},
     }
+

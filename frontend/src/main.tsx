@@ -18,7 +18,7 @@ type RecordData = Record<string, string|number|boolean|null>
 type Point = {date:string;price:string}
 type Signal = {id:string;strategy:string;state:string;observed_at:string;details:RecordData & {title:string;currency:string;history:Point[];downside:RecordData}}
 type Market = {component:string;status:string;checked_at?:string}
-type Prefs = {capital:string; roi:string; max_cost:string; min_profit:string; liquidity:number; max_age_seconds:number; frequency_minutes:number; quiet_start:number|null; quiet_end:number|null; collections:string[]; markets:string[]; strategies:string[]; signals:boolean; reminders:boolean; marketing:boolean}
+type Prefs = {limit_per_gift:boolean;capital:string; roi:string; max_cost:string; min_profit:string; liquidity:number; max_age_seconds:number; frequency_minutes:number; quiet_start:number|null; quiet_end:number|null; collections:string[]; markets:string[]; strategies:string[]; signals:boolean; reminders:boolean; marketing:boolean}
 type Profile = {id:number;name:string;photo?:string;active:boolean;admin:boolean;lifetime:boolean;frozen_at?:string;ends_at?:string;prefs:Prefs;payments:RecordData[]}
 type Item = {id:number;title:string;cost:string;currency:string;virtual:boolean;estimate?:string;proceeds?:string;sold_at?:string;available_at?:string;scenario?:string}
 const nf = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2})
@@ -28,6 +28,7 @@ const strategyNames:Record<string,string> = {floor:'Floor Flip',cross:'Cross-mar
 const statusNames:Record<string,string> = {license_required:'Ожидает разрешения',partner_contract_required:'Ожидает доступа',key_required:'Нужен API-ключ',unavailable:'Недоступен',disabled:'Отключён',online:'Подключён',stale:'Данные устарели',initializing:'Подключение'}
 const nav = [{name:'Главная',icon:LayoutDashboard},{name:'Сканер',icon:ScanLine},{name:'Портфель',icon:Wallet},{name:'Аналитика',icon:BarChart3},{name:'Профиль',icon:UserRound}]
 const metricLabels: Record<string,string> = {
+ fair_value:'Рыночный ориентир', conservative_sale:'Консервативный сценарий цены', optimistic_sale:'Оптимистичный сценарий цены', optimistic_profit:'Оптимистичная прибыль',
  cost:'Полная себестоимость', proceeds:'Чистая выручка', profit:'Расчётная прибыль', roi:'ROI, %',
  break_even:'Точка безубыточности', max_buy:'Максимальная цена покупки', conservative_profit:'Консервативная прибыль',
  transfer:'Перевод', buy_commission:'Комиссия покупки', sell_commission:'Комиссия продажи', fx_impact:'Влияние курса',
@@ -78,7 +79,7 @@ function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
   <div className="signal-media"><Art signal={signal}/><span className="strategy">{d.market}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
   <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div><span className="roi">{Number(d.roi)>0?'+':''}{f(d.roi)}%</span></div>
   <div className="gift-attributes"><span>{d.symbol}</span><span>{strategyNames[signal.strategy]}</span></div>
-  <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Ориентир выхода</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{profitable?'+':''}{f(d.profit)} {d.currency}</b></div></div></div>
+  <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Оценка · {d.confidence==='low'?'по объявлениям':'по продажам'}</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{profitable?'+':''}{f(d.profit)} {d.currency}</b></div></div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
@@ -86,10 +87,12 @@ function App(){
  const [page,setPage]=useState('Главная')
  const [samples,setSamples]=useState<Signal[]>([])
  const [live,setLive]=useState<Signal[]>([])
+ const [watch,setWatch]=useState<Signal[]>([])
  const [catalogItems,setCatalogItems]=useState<Signal[]>([])
  const [markets,setMarkets]=useState<Market[]>([])
  const [me,setMe]=useState<Profile>()
  const [items,setItems]=useState<Item[]>([])
+ const [transactions,setTransactions]=useState<RecordData[]>([])
  const [selected,setSelected]=useState<Signal>()
  const [loading,setLoading]=useState(true)
  const [showSplash,setShowSplash]=useState(true)
@@ -104,8 +107,9 @@ function App(){
  const [period,setPeriod]=useState(30)
  const [admin,setAdmin]=useState<RecordData>()
  const [past,setPast]=useState<Signal[]>([])
- const [virtual,setVirtual]=useState(true)
+ const [virtual,setVirtual]=useState(false)
  const [closing,setClosing]=useState<number>()
+ const [editing,setEditing]=useState<Item>()
  const [prefs,setPrefs]=useState<Prefs>()
  const [showPrefs,setShowPrefs]=useState(false)
  const [advancedPrefs,setAdvancedPrefs]=useState(false)
@@ -114,12 +118,15 @@ function App(){
  const [scannerMode,setScannerMode]=useState<'opportunities'|'market'>('opportunities')
  const [catalogPage,setCatalogPage]=useState(1)
  const [catalogHasMore,setCatalogHasMore]=useState(false)
+ const [catalogTotal,setCatalogTotal]=useState(0)
+ const [catalogSession,setCatalogSession]=useState('')
+ const [diagnostics,setDiagnostics]=useState<Record<string,unknown>>()
  const [busy,setBusy]=useState(false)
  const [pendingVerify,setPendingVerify]=useState<string>()
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
- const loadItems=async()=>setItems(await api<Item[]>('/portfolio'))
- const liveFeed=async()=>setLive(await api<Signal[]>('/signals'))
- const catalogFeed=async(q='',page=1)=>{const params=new URLSearchParams({offset:String((page-1)*20),limit:'20'});if(q)params.set('q',q);const data=await api<Signal[]>('/catalog?'+params);setCatalogItems(data);setCatalogPage(page);setCatalogHasMore(data.length===20)}
+ const loadItems=async()=>{const [positions,history]=await Promise.all([api<Item[]>('/portfolio'),api<RecordData[]>('/portfolio/history')]);setItems(positions);setTransactions(history)}
+ const liveFeed=async()=>{const [signals,nearby]=await Promise.all([api<Signal[]>('/signals'),api<Signal[]>('/nearby')]);setLive(signals);setWatch(nearby)}
+ const catalogFeed=async(q='',page=1)=>{const params=new URLSearchParams({offset:String((page-1)*20),limit:'20'});if(q)params.set('q',q);if(page>1&&catalogSession)params.set('session',catalogSession);const data=await api<{items:Signal[];has_more:boolean;total:number;session:string}>('/catalog?'+params);setCatalogItems(data.items);setCatalogPage(page);setCatalogHasMore(data.has_more);setCatalogTotal(data.total);setCatalogSession(data.session)}
  const announce=(e:unknown)=>setToast(e instanceof Error?e.message:String(e))
  const change=(name:string)=>{tg?.HapticFeedback?.selectionChanged();setPage(name);setFilter('all');setMarket('all');window.scrollTo(0,0)}
  const run=async(task:()=>Promise<void>)=>{if(busy)return;setBusy(true);try{await task()}catch(e){announce(e)}finally{setBusy(false)}}
@@ -148,6 +155,7 @@ function App(){
  },[pendingVerify])
  useEffect(()=>{
   if(page==='Владелец')void api<RecordData>(`/admin/statistics?days=${period}`).then(setAdmin).catch(announce)
+  if(page==='Владелец')void api<Record<string,unknown>>('/admin/diagnostics').then(setDiagnostics).catch(announce)
   if(page==='Аналитика'&&me?.active)void api<Signal[]>('/signals?past=true').then(setPast).catch(announce)
  },[page,period,me?.active])
  const isDemo=!me?.active
@@ -163,9 +171,11 @@ function App(){
  const portfolio=items.filter(i=>i.virtual===virtual)
  const moneyTotals=useMemo(()=>Object.fromEntries(['TON','GRAM'].map(currency=>{
   const entries=portfolio.filter(item=>item.currency===currency)
-  return [currency,{invested:entries.filter(item=>!item.sold_at).reduce((sum,item)=>sum+Number(item.cost),0),
+  const open=entries.filter(item=>!item.sold_at);const complete=open.every(item=>item.estimate!=null)
+  const value=complete?open.reduce((sum,item)=>sum+Number(item.estimate),0):null
+  return [currency,{value,count:open.length,unknown:open.filter(item=>item.estimate==null).length,invested:entries.filter(item=>!item.sold_at).reduce((sum,item)=>sum+Number(item.cost),0),
     realized:entries.filter(item=>item.sold_at).reduce((sum,item)=>sum+Number(item.proceeds)-Number(item.cost),0),
-    unrealized:entries.filter(item=>!item.sold_at&&item.estimate!=null).reduce((sum,item)=>sum+Number(item.estimate)-Number(item.cost),0)}]
+    unrealized:complete?open.reduce((sum,item)=>sum+Number(item.estimate)-Number(item.cost),0):null}]
  })),[portfolio])
  const [botName,setBotName]=useState('')
  useEffect(()=>{void api<{bot_username:string}>('/public-config').then(x=>setBotName(x.bot_username)).catch(()=>{})},[])
@@ -178,8 +188,8 @@ function App(){
   for(const key of ['liquidity','max_age_seconds','frequency_minutes'] as const)if(form.has(key))next[key]=Number(form.get(key))
   for(const key of ['quiet_start','quiet_end'] as const)if(form.has(key))next[key]=form.get(key)===''?null:Number(form.get(key))
   for(const key of ['collections','markets','strategies'] as const)if(form.has(key))next[key]=String(form.get(key)).split(',').map(x=>x.trim()).filter(Boolean)
-  for(const key of ['signals','marketing','reminders'] as const)next[key]=form.get(key)==='on'
-  void run(async()=>{setPrefs(await api<Prefs>('/me/preferences',{method:'PUT',body:JSON.stringify(next)}));if(me?.active)await liveFeed();setToast('Настройки сохранены');setShowPrefs(false)})
+  for(const key of ['signals','marketing','reminders','limit_per_gift'] as const)next[key]=form.get(key)==='on'
+  void run(async()=>{const saved=await api<Prefs>('/me/preferences',{method:'PUT',body:JSON.stringify(next)});setPrefs(saved);setMe(prev=>prev?{...prev,prefs:saved}:prev);if(me?.active)await liveFeed();setToast('Настройки сохранены');setShowPrefs(false)})
  }
  async function exportStats(){
   const response=await fetch('/api/admin/statistics?format=csv&days='+period,{headers:{Authorization:'tma '+auth}})
@@ -224,21 +234,23 @@ function App(){
     <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Настоящие карточки, учебные цены в GRAM':'Расчётные торговые возможности'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
    </>}
    {page==='Сканер'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM (TON 1:1).`:'Свежие листинги Portals: 20 подарков на странице.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
+    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Настоящие изображения и атрибуты; демо-цены показаны в GRAM.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Проанализированная часть рынка Portals. Фоновый обход продолжается.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
     <div className="segmented scanner-tabs"><button className={scannerMode==='opportunities'?'chosen':''} onClick={()=>{setScannerMode('opportunities');setSearch('');setSearchInput('')}}>Выгодные</button><button className={scannerMode==='market'?'chosen':''} onClick={()=>{setScannerMode('market');setSearch('');setSearchInput('');if(!isDemo)void run(()=>catalogFeed('',1))}}>Весь рынок</button></div>
     <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();setSearch(searchInput);if(!isDemo&&scannerMode==='market')void run(()=>catalogFeed(searchInput,1))}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');setSearch('');if(!isDemo&&scannerMode==='market')void run(()=>catalogFeed('',1))}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={busy}>{busy?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
     <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Portals</option><option>Portals</option></select></Field>
     <Field label="Порядок"><select value={sort} onChange={e=>setSort(e.target.value)}><option value="latest">Сначала новые</option><option value="roi">По доходности</option><option value="cost">По себестоимости</option></select></Field></div>{signalGrid(display)}
-    {!isDemo&&scannerMode==='market'&&<div className="pagination"><button className="ghost" disabled={busy||catalogPage===1} onClick={()=>void run(()=>catalogFeed(search,catalogPage-1))}><ArrowLeft size={16}/> Назад</button><strong>Страница {catalogPage}</strong><button className="ghost" disabled={busy||!catalogHasMore} onClick={()=>void run(()=>catalogFeed(search,catalogPage+1))}>Дальше <ArrowRight size={16}/></button></div>}
+    {!isDemo&&scannerMode==='opportunities'&&!display.length&&watch.length>0&&<section><h2>Для наблюдения</h2><p>Укладываются в бюджет, но не подтверждены как прибыльные сделки. Проверьте достоверность оценки и комиссии.</p>{signalGrid(watch)}</section>}
+    {!isDemo&&scannerMode==='market'&&<div className="pagination"><button className="ghost" disabled={busy||catalogPage===1} onClick={()=>void run(()=>catalogFeed(search,catalogPage-1))}><ArrowLeft size={16}/> Назад</button><strong>{catalogPage} / {Math.max(1,Math.ceil(catalogTotal/20))} · {catalogTotal} лотов</strong><button className="ghost" disabled={busy||!catalogHasMore} onClick={()=>void run(()=>catalogFeed(search,catalogPage+1))}>Дальше <ArrowRight size={16}/></button></div>}
    </>}
    {page==='Портфель'&&<>
     <div className="intro"><div><h1>Портфель</h1><p>Учёт позиций и виртуальные сделки.</p></div><div className="segmented"><button className={virtual?'chosen':''} onClick={()=>setVirtual(true)}>Виртуальный</button><button className={!virtual?'chosen':''} onClick={()=>setVirtual(false)}>Личный</button></div></div>
     {!me?<div className="panel empty"><Wallet/><strong>Войдите через Telegram</strong><span>Ваши позиции сохраняются в профиле.</span><button className="primary" onClick={()=>bot()}>Открыть бота</button></div>:<>
-     <div className="metrics portfolio-metrics">{Object.entries(moneyTotals).map(([currency,totals])=><div className="metric" key={currency}><div><Wallet size={16}/>{currency} в открытых позициях</div><strong>{f(totals.invested)} <em>{currency}</em></strong><small>Результат закрытых · {f(totals.realized)} · оценка открытых · {f(totals.unrealized)}</small></div>)}</div>
+     <div className="metrics portfolio-metrics">{Object.entries(moneyTotals).map(([currency,totals])=><div className="metric" key={currency}><div><Wallet size={16}/>{currency} в открытых позициях</div><strong>{f(totals.invested)} <em>{currency}</em></strong><small>Подарков: {totals.count} · без оценки: {totals.unknown}</small><small>Оценочная чистая стоимость: {f(totals.value)}</small><small>Реализованная прибыль: {f(totals.realized)}</small><small>Нереализованный результат: {f(totals.unrealized)}</small></div>)}</div>
+     <div className="panel list-panel"><h2>Свободный баланс</h2><p>{f(me?.prefs.capital)} GRAM · указан вами в настройках, не баланс кошелька.</p><h2>История сделок</h2>{transactions.filter(t=>t.virtual===virtual).map(t=><div className="table-row" key={String(t.id)}><span>{String(t.title)} · {({buy:'Покупка',sell:'Продажа',cost_correction:'Коррекция стоимости'} as Record<string,string>)[String(t.kind)]??t.kind}<small>{fmtDate(t.created_at)}</small></span><strong>{f(t.amount)} {t.currency}</strong></div>)}</div>
      <form className="panel filters" onSubmit={e=>{e.preventDefault();const form=e.currentTarget;const d=new FormData(form);void run(async()=>{await api('/portfolio',post({title:d.get('title'),cost:d.get('cost'),currency:d.get('currency'),virtual}));form.reset();await loadItems()})}}>
        <Field label="Название"><input name="title" required maxLength={120}/></Field><Field label="Себестоимость"><input name="cost" type="number" step="any" min=".000000001" required/></Field><Field label="Валюта"><select name="currency"><option>TON</option><option>GRAM</option></select></Field><button className="primary" disabled={busy}>Добавить</button>
      </form>
-     <div className="panel list-panel"><h2>Позиции</h2>{!portfolio.length&&<p>Здесь появятся добавленные подарки.</p>}{portfolio.map(i=><div className="position" key={i.id}><div><strong>{i.title}</strong><small>{i.sold_at?'Закрыта '+fmtDate(i.sold_at):`Себестоимость ${f(i.cost)} ${i.currency}`}</small></div><div><span>{i.sold_at?`Результат ${f(Number(i.proceeds)-Number(i.cost))} ${i.currency}`:i.estimate?`Оценка ${f(i.estimate)} ${i.currency}`:'Оценки пока нет'}</span>{!i.sold_at&&<button className="ghost" onClick={()=>i.scenario?void run(async()=>{await api('/portfolio/'+i.id+'/close',post({proceeds:'0'}));await loadItems()}):setClosing(closing===i.id?undefined:i.id)}>{i.scenario?'Симулировать продажу':'Закрыть'}</button>}</div>{closing===i.id&&<form onSubmit={e=>{e.preventDefault();const data=new FormData(e.currentTarget);void run(async()=>{await api('/portfolio/'+i.id+'/close',post({proceeds:data.get('proceeds')}));setClosing(undefined);await loadItems()})}}><Field label={i.available_at?'Выручка · после '+fmtDate(i.available_at):'Чистая выручка'}><input name="proceeds" required type="number" min="0" step="any"/></Field><button className="primary" disabled={busy}>Сохранить</button></form>}</div>)}</div>
+     <div className="panel list-panel"><h2>Позиции</h2>{!portfolio.length&&<p>Здесь появятся добавленные подарки.</p>}{portfolio.map(i=><div className="position" key={i.id}><div><strong>{i.title}</strong><small>{i.sold_at?'Закрыта '+fmtDate(i.sold_at):`Себестоимость ${f(i.cost)} ${i.currency}`}</small></div><div><button className="ghost" onClick={()=>setEditing(i)}>Изменить</button><button className="ghost" onClick={()=>{if(window.confirm('Удалить эту позицию и её историю?'))void run(async()=>{await api('/portfolio/'+i.id,{method:'DELETE'});await loadItems()})}}>Удалить</button><span>{i.sold_at?`Результат ${f(Number(i.proceeds)-Number(i.cost))} ${i.currency}`:i.estimate?`Оценка ${f(i.estimate)} ${i.currency}`:'Оценки пока нет'}</span>{!i.sold_at&&<button className="ghost" onClick={()=>i.scenario?void run(async()=>{await api('/portfolio/'+i.id+'/close',post({proceeds:'0'}));await loadItems()}):setClosing(closing===i.id?undefined:i.id)}>{i.scenario?'Симулировать продажу':'Закрыть'}</button>}</div>{closing===i.id&&<form onSubmit={e=>{e.preventDefault();const data=new FormData(e.currentTarget);void run(async()=>{await api('/portfolio/'+i.id+'/close',post({proceeds:data.get('proceeds')}));setClosing(undefined);await loadItems()})}}><Field label={i.available_at?'Выручка · после '+fmtDate(i.available_at):'Чистая выручка'}><input name="proceeds" required type="number" min="0" step="any"/></Field><button className="primary" disabled={busy}>Сохранить</button></form>}</div>)}</div>
     </>}
    </>}
    {page==='Аналитика'&&<>
@@ -254,29 +266,32 @@ function App(){
     </div>
     {me&&prefs&&<div className="panel list-panel"><div className="panel-head"><h2>Фильтры и уведомления</h2><button className="ghost" onClick={()=>setShowPrefs(!showPrefs)}><Settings2 size={16}/>{showPrefs?'Свернуть':'Настроить'}</button></div>
     {showPrefs&&<form className="settings-form" onSubmit={saveSettings}>
-      {([['capital','Мой бюджет, GRAM (TON 1:1)'],['roi','Минимальная доходность, %'],['max_cost','Максимальная цена, GRAM']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
+      {([['capital','Мой бюджет, GRAM · сеть TON'],['roi','Минимальная доходность, %'],['max_cost','Лимит подарка, GRAM (если включён ниже)']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
       {([['signals','Торговые уведомления'],['reminders','Напоминания о подписке'],['marketing','Согласие на рассылки']] as const).map(([key,label])=><label className="check" key={key}><input type="checkbox" name={key} defaultChecked={prefs[key]}/>{label}</label>)}
       <button type="button" className="ghost" onClick={()=>setAdvancedPrefs(!advancedPrefs)}>{advancedPrefs?'Скрыть дополнительные':'Дополнительные настройки'}</button>
-      {advancedPrefs&&<>{([['min_profit','Минимальная прибыль, TON'],['liquidity','Минимум продаж'],['frequency_minutes','Интервал уведомлений, мин.']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
+      <label className="checkbox"><input type="checkbox" name="limit_per_gift" defaultChecked={prefs.limit_per_gift}/> Ограничить цену одного подарка отдельно от бюджета</label>{advancedPrefs&&<>{([['min_profit','Минимальная прибыль, TON'],['liquidity','Минимум продаж'],['frequency_minutes','Интервал уведомлений, мин.']] as const).map(([key,label])=><Field key={key} label={label}><input type="number" step="any" name={key} defaultValue={prefs[key]??''}/></Field>)}
       {([['collections','Только коллекции'],['markets','Площадки'],['strategies','Стратегии']] as const).map(([key,label])=><Field key={key} label={label}><input name={key} defaultValue={prefs[key].join(', ')}/></Field>)}</>}
       <button className="primary" disabled={busy}>Сохранить</button></form>}</div>}
     {me&&<div className="panel list-panel"><h2>История платежей</h2>{me.payments.length?me.payments.map(o=><div className="table-row" key={String(o.id)}><span>{fmtDate(o.created_at)}</span><span>{o.status}</span><strong>{o.amount} ⭐</strong></div>):<p>Платежей пока нет.</p>}
     <button className="ghost danger" onClick={()=>{if(window.confirm('Удалить профиль, портфель, настройки и переписку? Финансовые записи сохранятся.'))void run(async()=>{await api('/me',{method:'DELETE'});setMe(undefined);setItems([]);setLive([]);setToast('Профиль удалён')})}}>Удалить персональные данные</button></div>}
    </>}
    {page==='Владелец'&&<><div className="intro"><div><h1>Статистика владельца</h1><p>Подписки, выдачи и выручка в Telegram Stars.</p></div><button className="primary" onClick={()=>void run(exportStats)}>Экспорт CSV</button></div><div className="segmented">{[[1,'Сегодня'],[7,'7 дней'],[30,'30 дней'],[0,'Всё время']].map(([n,label])=><button key={n} className={period===n?'chosen':''} onClick={()=>setPeriod(Number(n))}>{label}</button>)}</div><div className="panel list-panel">
+    {diagnostics&&<><h2>Диагностика рынка</h2>{Object.entries({unique_lots:'Уникальных лотов в базе',collections_seen:'Коллекций в базе',fresh_lots:'Актуальных лотов',analyzed:'Проанализировано за цикл',profitable:'Выгодных за цикл',insufficient:'Недостаточно данных',asks_only:'Только объявления',fees_missing:'Не настроены комиссии',non_positive:'Неположительная прибыль',duration_seconds:'Длительность цикла, сек.'}).map(([key,label])=><div className="table-row" key={key}><span>{label}</span><strong>{f(diagnostics[key])}</strong></div>)}<p>Обновлено: {fmtDate(diagnostics.updated_at)}. Обход по страницам не является полным снимком рынка.</p></>}
     {admin&&Object.entries(admin).map(([k,v])=><div className="table-row" key={k}><span>{adminLabels[k]??k}</span><strong>{f(v)}</strong></div>)}</div></>}
    </motion.div></main>
   </div>
+  {editing&&<div className="overlay"><form className="modal panel" onSubmit={e=>{e.preventDefault();const d=new FormData(e.currentTarget);void run(async()=>{await api('/portfolio/'+editing.id,{method:'PATCH',body:JSON.stringify({title:d.get('title'),cost:d.get('cost'),currency:editing.currency,virtual:editing.virtual})});setEditing(undefined);await loadItems()})}}><h2>Изменить позицию</h2><Field label="Название"><input name="title" defaultValue={editing.title} required/></Field><Field label={'Себестоимость, '+editing.currency}><input type="number" min="0.000000001" step="any" name="cost" defaultValue={editing.cost} required/></Field><div className="inline"><button type="submit" className="primary" disabled={busy||!!editing.sold_at}>Сохранить</button><button type="button" className="ghost" onClick={()=>setEditing(undefined)}>Назад</button></div>{editing.sold_at&&<p>Проданная позиция закрыта для редактирования.</p>}</form></div>}
   {(selected||calculator||legal)&&<div className="overlay" onClick={()=>{setSelected(undefined);setCalculator(false);setLegal(undefined)}}><section role="dialog" aria-modal="true" className="modal panel" onClick={e=>e.stopPropagation()}><div className="panel-head"><h2>{selected?selected.details.title:calculator?'Финансовый калькулятор':'Документы сервиса'}</h2><button className="icon-button" aria-label="Закрыть" onClick={()=>{setSelected(undefined);setCalculator(false);setLegal(undefined)}}><X size={20}/></button></div>
     {selected&&<><Art signal={selected} large/><p>{selected.details.model} · {selected.details.backdrop} · {selected.details.symbol}{selected.details.rarity?' · '+selected.details.rarity:''}</p>
       <p>{strategyNames[selected.strategy]} · {selected.details.market} → {selected.details.exit_market} · {fmtDate(selected.observed_at)}</p>
-      <p>Сопоставимых продаж · {selected.details.liquidity} · Ограничение перевода · {fmtDate(selected.details.transferable_at)}</p>
+      <p>Подтверждённых продаж · {selected.details.sales_count??selected.details.liquidity} · Аналогичных объявлений · {selected.details.comparable_asks??0}</p>
+      <p>Достоверность: {({high:'высокая',medium:'средняя',low:'низкая — только объявления',insufficient:'недостаточно данных'} as Record<string,string>)[String(selected.details.confidence)]??'не определена'}. Срок перепродажи неизвестен.</p>
       {selected.details.history.length>0&&<Chart points={selected.details.history}/>}
       <dl>{Object.entries(metricLabels).map(([key,label])=><div key={key}><dt>{label}</dt><dd>{f(selected.details[key])}</dd></div>)}</dl>
       <p>{selected.details.risk}</p><div className="inline">
       {selected.state==='demo'&&telegramSlug(selected)&&<a className="ghost" href={'https://t.me/nft/'+telegramSlug(selected)} target="_blank" rel="noreferrer">Посмотреть в Telegram <ArrowUpRight size={16}/></a>}
-      {selected.details.url&&<a className="primary" href={String(selected.details.url)} target="_blank" rel="noreferrer">Открыть подарок <ArrowUpRight size={16}/></a>}
-      {selected.state!=='demo'&&<button className="ghost" disabled={busy||pendingVerify===selected.id} onClick={()=>void run(async()=>{await api('/signals/'+selected.id+'/verify',post());setPendingVerify(selected.id);setToast('Проверка поставлена в очередь')})}>{pendingVerify===selected.id?'Проверяем…':'Перепроверить'}</button>}
+      {selected.details.url&&selected.state!=='unavailable'&&<a className="primary" href={String(selected.details.url)} target="_blank" rel="noreferrer">Купить на Portals <ArrowUpRight size={16}/></a>}
+      {selected.state!=='demo'&&<button className="ghost" disabled={busy} onClick={()=>void run(async()=>{const result=await api<{status:string;item?:Signal}>('/signals/'+selected.id+'/verify',post());if(result.item)setSelected(result.item);else setSelected({...selected,state:'unavailable'});setToast(result.status==='available'?'Цена, наличие и оценка обновлены':'Лот продан или снят с продажи')})}>{busy?'Проверяем…':'Перепроверить'}</button>}
       <button className="ghost" disabled={busy} onClick={()=>void run(async()=>{if(!me)throw new Error('Для портфеля откройте терминал через Telegram');await api('/portfolio/from-signal/'+selected.id+'?virtual='+(selected.state==='demo'),post());await loadItems();setToast('Позиция добавлена')})}>{selected.state==='demo'?'В виртуальный портфель':'В портфель'}</button></div></>}
     {calculator&&<><form className="settings-form" onSubmit={e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.currentTarget));void run(async()=>setCalculated(await api('/calculator',post(data))))}}>
       {([['buy','Цена покупки','10'],['sell','Цена продажи','12'],['buy_fee','Комиссия покупки, доля','0'],['sell_fee','Комиссия продажи, доля','0'],['transfer','Перевод','0'],['network','Сетевые расходы','0'],['conversion','Конвертация','0'],['extra_sell','Расходы продажи','0'],['fx','Курс в валюту расчёта','1'],['fx_shock_pct','Изменение курса, %','0'],['target_roi','Целевой ROI, %','5']] as const).map(([k,label,value])=><Field key={k} label={label}><input type="number" step="any" name={k} defaultValue={value} required/></Field>)}
