@@ -101,7 +101,8 @@ def create_api(db, config, lifespan):
         output = []
         portals_fallback = ("license_required" if not config.portals_data_licensed else
                             "key_required" if not config.portals_api_key else "initializing")
-        for name, fallback in (("Portals", portals_fallback), ("MRKT", "partner_contract_required")):
+        mrkt_fallback = "key_required" if not config.mrkt_api_key else "initializing"
+        for name, fallback in (("Portals", portals_fallback), ("MRKT", mrkt_fallback)):
             current = status.get(name, {"component": name, "status": fallback})
             if current["status"] == "online" and (datetime.now(UTC)-current["checked_at"]).total_seconds() > 180:
                 current["status"] = "stale"
