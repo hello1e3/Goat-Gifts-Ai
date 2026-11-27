@@ -189,16 +189,16 @@ class Portals:
         output = {}
         # Combine cheap asks with fresh listings. A price-only feed gets stuck
         # on a few low-floor collections and misses new underpriced gifts.
-        for ordering, offsets in (("price asc", range(0, 300, 100)),
-                                  ("listed_at desc", range(0, 200, 100))):
+        for ordering, offsets in (("price asc", range(0, 200, 20)),
+                                  ("listed_at desc", range(0, 100, 20))):
             for offset in offsets:
-                result = await self.get("/nfts/search", status="listed", limit=100, offset=offset,
+                result = await self.get("/nfts/search", status="listed", limit=20, offset=offset,
                                         sort_by=ordering)
                 for raw in result.get("results", []):
                     if raw.get("status") == "listed":
                         item = self.listing(raw)
                         output[item.external_id] = item
-                if len(result.get("results", [])) < 100:
+                if not result.get("results"):
                     break
         return list(output.values())
 
