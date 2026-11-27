@@ -62,7 +62,11 @@ async def lifespan(app):
                 if config.app_url.startswith("https://"):
                     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
                         text="Терминал", web_app=WebAppInfo(url=config.app_url)))
-                if config.webhook_url:
+                # Bothost injects its own WEBHOOK_URL even when the application
+                # has not been configured for webhook delivery.  Only opt in
+                # when the matching secret is explicitly supplied; otherwise
+                # long polling remains the safe default.
+                if config.webhook_url and config.webhook_secret:
                     if not re.fullmatch(r"[A-Za-z0-9_-]{24,256}",config.webhook_secret) or not config.webhook_url.startswith("https://"):
                         raise RuntimeError("Webhook requires HTTPS and a secret of at least 24 characters")
                     await bot.set_webhook(config.webhook_url, secret_token=config.webhook_secret,
@@ -127,3 +131,4 @@ async def webhook(request: Request):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     uvicorn.run(app, host="0.0.0.0", port=config.port, access_log=False)
+
