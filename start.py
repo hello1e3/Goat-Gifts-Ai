@@ -110,6 +110,7 @@ async def lifespan(app):
 app = create_api(db, config, lifespan)
 
 
+@app.post("/webhook")
 @app.post("/telegram/webhook")
 async def webhook(request: Request):
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
