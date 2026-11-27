@@ -73,11 +73,11 @@ async def catalog(conn, search=""):
         select l.market,l.external_id,l.price,l.currency,l.url,l.transferable_at,l.observed_at,
                g.id,g.collection,g.number,g.title,g.model,g.backdrop,g.symbol,g.rarity,g.image
         from market_listings l join gifts g on g.id=l.gift_id
-        where l.active and l.observed_at>now()-interval '3 minutes'
+        where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
           and (:search='' or g.title ilike '%'||:search||'%' or g.collection ilike '%'||:search||'%'
                or g.model ilike '%'||:search||'%' or g.backdrop ilike '%'||:search||'%'
                or g.symbol ilike '%'||:search||'%' or cast(g.number as text)=:search)
-        order by l.observed_at desc,l.price asc limit 120
+        order by l.price asc,l.observed_at desc limit 120
     """, search=query_text)
     return [{
         "id": f"catalog:{row['market']}:{row['external_id']}", "strategy": "floor", "state": "listed",
@@ -98,7 +98,7 @@ def demo():
         ("snoopdogg-223555", "Snoop Dogg", 223555, "Old School", "Deep Cyan", "Eikthyrnir",
          "18.40", "20.30", "floor", "Portals", 14),
         ("plushpepe-1", "Plush Pepe", 1, "Pumpkin", "Onyx Black", "Illuminati",
-         "12.00", "13.35", "cross", "MRKT", 23),
+         "12.00", "13.35", "floor", "Portals", 23),
         ("durovscap-1", "Durov’s Cap", 1, "Shadow", "Shamrock Green", "Ram of Amun",
          "27.60", "30.10", "instant", "Portals", 18),
     ]
