@@ -19,7 +19,7 @@ from goat.bot import make_dispatcher, stats_text
 from goat.config import Config
 from goat.db import Database, query, scalar
 from goat.jobs import fanout, loop, outbox
-from goat.market import Portals, health, scan
+from goat.market import MRKT, Portals, health, scan
 from goat.telegram import poll
 
 config = Config()
@@ -46,8 +46,12 @@ async def lifespan(app):
     app.state.bot_username = (await bot.get_me()).username if bot else ""
     tasks = []
     async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
-        status = {"MRKT": "partner_contract_required"}
+        status = {}
         adapters = []
+        if config.mrkt_api_key:
+            adapters.append(MRKT(client, config.mrkt_api_key))
+        else:
+            status["MRKT"] = "key_required"
         if not config.portals_data_licensed:
             status["Portals"] = "license_required"
         elif not config.portals_api_key:
