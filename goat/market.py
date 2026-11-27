@@ -186,28 +186,35 @@ class Portals:
                        date(raw.get("unlocks_at")), floor or None)
 
     async def listings(self):
-        output = []
-        # Cheap listings first: these are the offers an arbitrage scanner must
-        # inspect before the newest (and often fairly priced) items.
-        for offset in (0, 40, 80):
-            result = await self.get("/nfts/search", status="listed", limit=40, offset=offset,
-                                    sort_by="price asc")
-            page = [self.listing(raw) for raw in result["results"] if raw["status"] == "listed"]
-            output.extend(page)
-            if len(result["results"]) < 40:
-                break
-        return output
+        output = {}
+        # Combine cheap asks with fresh listings. A price-only feed gets stuck
+        # on a few low-floor collections and misses new underpriced gifts.
+        for ordering, offsets in (("price asc", range(0, 300, 100)),
+                                  ("listed_at desc", range(0, 200, 100))):
+            for offset in offsets:
+                result = await self.get("/nfts/search", status="listed", limit=100, offset=offset,
+                                        sort_by=ordering)
+                for raw in result.get("results", []):
+                    if raw.get("status") == "listed":
+                        item = self.listing(raw)
+                        output[item.external_id] = item
+                if len(result.get("results", [])) < 100:
+                    break
+        return list(output.values())
 
-    async def search(self, text):
+    async def search(self, text, offset=0, limit=60):
         query = text.strip()[:80]
         if not query:
-            return await self.listings()
+            result = await self.get("/nfts/search", status="listed", limit=min(limit, 100),
+                                    offset=max(0, offset), sort_by="listed_at desc")
+            return [self.listing(raw) for raw in result.get("results", [])
+                    if raw.get("status") == "listed"]
         collections = await self.get("/collections", search=query, limit=10)
         ids = [str(item["id"]) for item in collections.get("collections", []) if item.get("id")]
         if not ids:
             return []
         result = await self.get("/nfts/search", collection_ids=",".join(ids), status="listed",
-                                limit=120, offset=0, sort_by="price asc")
+                                limit=min(limit, 100), offset=max(0, offset), sort_by="price asc")
         return [self.listing(raw) for raw in result.get("results", []) if raw.get("status") == "listed"]
 
     async def sales(self):
@@ -457,7 +464,23 @@ async def scan(db, adapters, status):
             gift = Gift(**{field: row[field] for field in Gift.__dataclass_fields__})
             sales_data.append(Sale(row["market"], row["external_id"], gift, row["price"], row["currency"], row["sold_at"]))
         by_name = {adapter.name: adapter for adapter in adapters}
-        for listing in current[:20]:
+        ranked = sorted(current, key=lambda item: (
+            (market_reference(item, current)[0] - item.price) / item.price,
+            -item.price), reverse=True)
+        selected, collections = [], set()
+        for item in ranked:
+            key = item.gift.collection.casefold()
+            if key not in collections:
+                selected.append(item)
+                collections.add(key)
+            if len(selected) >= 20:
+                break
+        for item in ranked:
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= 30:
+                break
+        for listing in selected:
             if listing.market not in fees:
                 continue
             adapter = by_name[listing.market]
