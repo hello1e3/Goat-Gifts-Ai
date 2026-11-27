@@ -19,7 +19,7 @@ from goat.config import Config
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, calculate
 from goat.jobs import EmojiManager, fanout, outbox
-from goat.market import Gift, Listing, Offer, Portals, Sale, candidates, scan
+from goat.market import Gift, Listing, MRKT, Offer, Portals, Sale, candidates, scan
 from goat.terminal import PortfolioInput, Preferences, add_item, close_item, portfolios, save_prefs, signals
 
 TOKEN = "123456789:TEST_DATA_ONLY"
@@ -236,6 +236,33 @@ def test_strategies_comparability_and_restrictions():
     assert {r[0] for r in candidates(locked, history, [alternative], Offer("1", Decimal(12)), fees, now)} == {"floor"}
 
 
+async def test_mrkt_contract_pagination_and_nanoton_price():
+    calls = []
+
+    async def transport(request):
+        calls.append((request.headers, json.loads(request.content)))
+        cursor = calls[-1][1]["cursor"]
+        count = 20 if not cursor else 1
+        gifts = [{
+            "id": f"gift-{cursor or 'first'}-{index}", "collectionName": "Plush Pepe", "number": index + 1,
+            "salePrice": "13000000000", "model": {"name": "Green"},
+            "backdrop": {"name": "Blue"}, "symbol": {"name": "Star"},
+            "photoUrl": "https://cdn.tgmrkt.io/gift.webp",
+        } for index in range(count)]
+        return httpx.Response(200, json={"gifts": gifts, "cursor": "next" if not cursor else ""})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = MRKT(client, "SYNTHETIC")
+        listings = await adapter.listings()
+
+    assert len(listings) == 21
+    assert listings[0].price == Decimal("13") and listings[0].currency == "TON"
+    assert listings[0].gift.model == "Green" and listings[0].gift.image.endswith("gift.webp")
+    assert calls[0][0]["Authorization"] == "SYNTHETIC"
+    assert calls[0][0]["Referer"] == "https://cdn.tgmrkt.io/"
+    assert calls[1][1]["cursor"] == "next"
+
+
 async def test_market_unavailable_stale_and_restart(db):
     class Unavailable:
         name = "Portals"
@@ -382,3 +409,4 @@ async def test_virtual_demo_position_uses_model_proceeds_after_delay(db):
         await close_item(conn, 1, id_, Decimal(999))
         result = await portfolios(conn, 1)
         assert result[0]["proceeds"] == details["proceeds"]
+
