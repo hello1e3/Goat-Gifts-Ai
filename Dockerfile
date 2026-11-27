@@ -1,8 +1,7 @@
-# syntax=docker/dockerfile:1
 FROM node:22-bookworm-slim AS frontend
 WORKDIR /src
 COPY frontend/package*.json ./
-RUN --mount=type=secret,id=build_ca if [ -f /run/secrets/build_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/build_ca; fi; npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY frontend/ .
 RUN npm run build
 
@@ -10,7 +9,8 @@ FROM python:3.12-slim AS app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8000
 WORKDIR /usr/src/goat
 COPY requirements.txt ./
-RUN --mount=type=secret,id=build_ca if [ -f /run/secrets/build_ca ]; then export PIP_CERT=/run/secrets/build_ca; fi; pip install --no-cache-dir -r requirements.txt && useradd --system --uid 10001 --no-create-home goat
+RUN pip install --no-cache-dir -r requirements.txt \
+    && useradd --system --uid 10001 --no-create-home goat
 COPY --chown=10001:10001 goat/ ./goat/
 COPY --chown=10001:10001 migrations/ ./migrations/
 COPY --chown=10001:10001 start.py alembic.ini ./
