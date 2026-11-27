@@ -79,7 +79,7 @@ function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
   <div className="signal-media"><Art signal={signal}/><span className="strategy">{d.market}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
   <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div><span className="roi">{Number(d.roi)>0?'+':''}{f(d.roi)}%</span></div>
   <div className="gift-attributes"><span>{d.symbol}</span><span>{d.evidence==='asks'?'Предварительный расчёт':strategyNames[signal.strategy]}</span></div>
-  <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Оценка · {d.confidence==='low'?'по объявлениям':'по продажам'}</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{profitable?'+':''}{f(d.profit)} {d.currency}</b></div></div></div>
+  <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Оценка · {d.evidence==='asks'?'по объявлениям':d.evidence==='sales'?'по продажам':'нет аналогов'}</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{d.profit==null?'Нужны аналоги':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
@@ -196,9 +196,21 @@ function App(){
   if(!response.ok)throw new Error('Экспорт недоступен')
   const url=URL.createObjectURL(await response.blob());const link=document.createElement('a');link.href=url;link.download='goat-statistics.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
  }
+ async function refreshGift(signal:Signal){
+  const result=await api<{status:string;item?:Signal}>('/signals/'+signal.id+'/verify',post())
+  const updated=result.item??{...signal,state:'unavailable'}
+  setSelected(current=>current?.id===signal.id?updated:current)
+  setCatalogItems(current=>current.map(item=>item.id===signal.id?updated:item))
+  if(me?.active)await liveFeed()
+  setToast(result.status==='available'?'Цена, наличие и оценка обновлены':'Лот продан или снят с продажи')
+ }
+ function openGift(signal:Signal){
+  setSelected(signal)
+  if(signal.state!=='demo')void run(()=>refreshGift(signal))
+ }
  function signalGrid(entries:Signal[]){
   return loading?<div className="signal-grid">{[1,2,3].map(i=><div className="skeleton" key={i}/>)}</div>:
-   entries.length?<div className="signal-grid">{entries.map(signal=><SignalCard key={signal.id} signal={signal} onClick={()=>setSelected(signal)}/>)}</div>:
+   entries.length?<div className="signal-grid">{entries.map(signal=><SignalCard key={signal.id} signal={signal} onClick={()=>openGift(signal)}/>)}</div>:
     <div className="empty"><ScanLine size={25}/><strong>Подходящих сигналов пока нет</strong><span>Проверьте фильтры и состояние площадок.</span></div>
  }
  return <MotionConfig reducedMotion="user"><div className="app-root">
@@ -291,7 +303,7 @@ function App(){
       <p>{selected.details.risk}</p><div className="inline">
       {selected.state==='demo'&&telegramSlug(selected)&&<a className="ghost" href={'https://t.me/nft/'+telegramSlug(selected)} target="_blank" rel="noreferrer">Посмотреть в Telegram <ArrowUpRight size={16}/></a>}
       {selected.details.url&&selected.state!=='unavailable'&&<a className="primary" href={String(selected.details.url)} target="_blank" rel="noreferrer">Купить на Portals <ArrowUpRight size={16}/></a>}
-      {selected.state!=='demo'&&<button className="ghost" disabled={busy} onClick={()=>void run(async()=>{const result=await api<{status:string;item?:Signal}>('/signals/'+selected.id+'/verify',post());if(result.item)setSelected(result.item);else setSelected({...selected,state:'unavailable'});setToast(result.status==='available'?'Цена, наличие и оценка обновлены':'Лот продан или снят с продажи')})}>{busy?'Проверяем…':'Перепроверить'}</button>}
+      {selected.state!=='demo'&&<button className="ghost" disabled={busy} onClick={()=>void run(()=>refreshGift(selected))}>{busy?'Проверяем…':'Перепроверить'}</button>}
       <button className="ghost" disabled={busy} onClick={()=>void run(async()=>{if(!me)throw new Error('Для портфеля откройте терминал через Telegram');await api('/portfolio/from-signal/'+selected.id+'?virtual='+(selected.state==='demo'),post());await loadItems();setToast('Позиция добавлена')})}>{selected.state==='demo'?'В виртуальный портфель':'В портфель'}</button></div></>}
     {calculator&&<><form className="settings-form" onSubmit={e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.currentTarget));void run(async()=>setCalculated(await api('/calculator',post(data))))}}>
       {([['buy','Цена покупки','10'],['sell','Цена продажи','12'],['buy_fee','Комиссия покупки, доля','0'],['sell_fee','Комиссия продажи, доля','0'],['transfer','Перевод','0'],['network','Сетевые расходы','0'],['conversion','Конвертация','0'],['extra_sell','Расходы продажи','0'],['fx','Курс в валюту расчёта','1'],['fx_shock_pct','Изменение курса, %','0'],['target_roi','Целевой ROI, %','5']] as const).map(([k,label,value])=><Field key={k} label={label}><input type="number" step="any" name={k} defaultValue={value} required/></Field>)}

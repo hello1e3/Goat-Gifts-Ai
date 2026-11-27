@@ -1,4 +1,5 @@
 import csv
+from hashlib import sha256
 from dataclasses import asdict
 from datetime import UTC, datetime
 import io
@@ -18,7 +19,7 @@ from goat.billing import history, statistics
 from goat.db import one, query, rows, scalar
 from goat.finance import Calculation, calculate
 from goat.gift_preview import GiftPreviews
-from goat.market import PORTALS_DEFAULT_FEES, Portals, listing_analysis
+from goat.market import PORTALS_DEFAULT_FEES, Portals, listing_analysis, candidates
 from goat.terminal import CloseInput, PortfolioInput, Preferences, add_item, catalog, close_item, demo, portfolios, save_prefs, signals
 
 
@@ -256,6 +257,14 @@ def create_api(db, config, lifespan):
                 m=market,e=external_id,d=json.dumps(details,default=str))
             await query(conn,"update trading_signals set state='stale' where listing_market=:m and listing_id=:e",
                         m=market,e=external_id)
+            for strategy, state, estimate in candidates(listing, sales, pool, None,
+                    {market:fee} if fee else {}, datetime.now(UTC)):
+                identity = sha256(f"{market}/{external_id}/{strategy}/{estimate['exit_market']}".encode()).hexdigest()
+                await query(conn,"""insert into trading_signals
+                    values(:id,:m,:listing,:strategy,cast(:d as jsonb),:state,now())
+                    on conflict(id) do update set details=excluded.details,state=excluded.state,observed_at=now()""",
+                    id=identity,m=market,listing=external_id,strategy=strategy,
+                    d=json.dumps(estimate,default=str),state=state)
         return {'status':'available','item':{'id':f'catalog:{market}:{external_id}',
                 'strategy':'floor','state':'listed','observed_at':datetime.now(UTC),'details':details}}
 

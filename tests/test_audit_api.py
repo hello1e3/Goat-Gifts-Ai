@@ -125,3 +125,32 @@ async def test_webapp_scan_reaches_profitable_tab_without_sales(db):
         assert found[0]['details']['evidence']=='asks'
         assert Decimal(found[0]['details']['profit'])>0
 
+
+async def test_opening_gift_enriches_model_and_updates_profitable_tab(db):
+    from goat.market import Portals
+    async with db.transaction() as conn:
+        await register(conn,1,None,'Test')
+        await grant(conn,1,86400,'trial')
+        await query(conn,"insert into system_health(component,status) values('Portals','online')")
+        target=await seed(conn)
+    peers=[replace(target,external_id=str(i),price=Decimal(price),
+        gift=replace(target.gift,id=f'peer-{i}',number=155+i,backdrop=f'B{i}',symbol=f'S{i}'))
+        for i,price in enumerate(('8','9','10','11'))]
+    app=create_api(db,Config(bot_token=TOKEN,admin_ids='1'),lifespan)
+    async with httpx.AsyncClient() as upstream:
+        adapter=Portals(upstream,'tma test')
+        async def get_listing(id_): return target
+        async def comparables(item): return peers
+        adapter.get_listing=get_listing
+        adapter.comparables=comparables
+        app.state.market_adapters={'Portals':adapter}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+            result=await client.post(f'/api/signals/catalog:Portals:{target.external_id}/verify',
+                headers={'Authorization':'tma '+init_data(1)})
+            assert result.status_code==200
+            details=result.json()['item']['details']
+            assert details['comparison_match']=='model' and Decimal(details['profit'])>0
+            async with db.transaction() as conn:
+                feed=await signals(conn,Preferences(capital=20))
+                assert len(feed)==1 and feed[0]['listing_id']==target.external_id
+

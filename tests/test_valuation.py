@@ -100,3 +100,35 @@ def test_cheaper_competitor_prevents_false_positive_even_when_outlier():
     assert d['conservative_sale']==1
     assert candidates(item,[],peers,None,{'Portals':FEES},datetime.now(UTC))==[]
 
+
+def test_model_baseline_handles_sparse_backgrounds_without_inventing_premium():
+    item=listing('5')
+    peers=[replace(item,external_id=str(i),price=Decimal(price),
+            gift=replace(item.gift,id=f'other-{i}',number=155+i,backdrop=f'Background {i}',symbol=f'Symbol {i}'))
+            for i,price in enumerate(('8','9','10','11'))]
+    d=listing_analysis(item,peers,FEES)
+    assert d['comparison_match']=='model'
+    assert d['evidence']=='asks' and d['confidence']=='low'
+    assert d['conservative_sale']==8
+    assert d['profit']>0 and d['conservative_profit']>0
+    assert candidates(item,[],peers,None,{'Portals':FEES},datetime.now(UTC))
+
+
+async def test_portals_resolves_missing_collection_and_loads_model_peers():
+    import httpx
+    async with httpx.AsyncClient() as client:
+        adapter=Portals(client,'tma test')
+        calls=[]
+        async def get(path,**params):
+            calls.append((path,params))
+            if path=='/collections':
+                return {'collections':[{'id':'wrong','name':'Lucky Locket Extra'},{'id':'right','name':'Lucky Locket'}]}
+            return {'results':[]}
+        adapter.get=get
+        await adapter.comparables(listing())
+        assert calls[1][1]['collection_ids']=='right'
+        assert calls[1][1]['filter_by_models']=='Rare Model'
+        assert 'filter_by_backdrops' not in calls[1][1]
+        await adapter.comparables(listing())
+        assert len([call for call in calls if call[0]=='/collections'])==1
+

@@ -230,9 +230,15 @@ class Portals:
     async def comparables(self, listing):
         collection_id = self.collection_ids.get(listing.gift.collection.casefold())
         if not collection_id:
-            return []
+            collections = await self.get('/collections', search=listing.gift.collection, limit=100)
+            match = next((c for c in collections.get('collections', [])
+                          if str(c.get('name', '')).casefold() == listing.gift.collection.casefold()), None)
+            if not match or not match.get('id'):
+                return []
+            collection_id = match['id']
+            self.collection_ids[listing.gift.collection.casefold()] = collection_id
         result = await self.get('/nfts/search',collection_ids=collection_id,
-            filter_by_models=listing.gift.model,filter_by_backdrops=listing.gift.backdrop,
+            filter_by_models=listing.gift.model,
             status='listed',sort_by='price asc',limit=100,offset=0)
         return [self.listing(raw) for raw in result.get('results',[]) if raw.get('status')=='listed']
 
@@ -449,7 +455,7 @@ async def scan(db, adapters, status):
             if isinstance(adapter,Portals) and listed:
                 # Fetch a comparable group explicitly instead of relying on
                 # accidental matches in a small mixed page. Rotate groups.
-                key = lambda item: (item.gift.collection,item.gift.model,item.gift.backdrop)
+                key = lambda item: (item.gift.collection,item.gift.model)
                 target = min(listed,key=lambda item:adapter.enriched_at.get(key(item),0))
                 try:
                     extra = await adapter.comparables(target)
