@@ -97,13 +97,17 @@ class Portals:
     def __init__(self, client: httpx.AsyncClient, token: str):
         self.client = client
         self.token = token
+        self.webapp = token.startswith("tma ")
         self.next_call = 0.0
 
     async def get(self, path, **params):
         clock = asyncio.get_running_loop().time
         await asyncio.sleep(max(0, self.next_call - clock()))
-        response = await self.client.get("https://portal-market.com/partners" + path,
-                                         params=params, headers={"Authorization": f"partners {self.token}"})
+        base = "https://portal-market.com/api" if self.webapp else "https://portal-market.com/partners"
+        authorization = self.token if self.webapp else f"partners {self.token}"
+        response = await self.client.get(base + path, params=params, headers={
+            "Authorization": authorization, "User-Agent": "GOAT-NFT/1.0",
+        })
         reset = response.headers.get("X-RateLimit-Reset", "0")
         pause = max(1.1, float(reset) if reset.isdecimal() and response.status_code == 429 else 0)
         self.next_call = clock() + pause
@@ -141,6 +145,9 @@ class Portals:
         return output
 
     async def sales(self):
+        if self.webapp:
+            # The reverse-engineered WebApp contract documents listings only.
+            return []
         result = await self.get("/market/actions/", action_types="purchase", limit=20)
         output = []
         for raw in result["actions"]:
@@ -156,6 +163,8 @@ class Portals:
                      if raw["id"] == external_id and raw["status"] == "listed"), None)
 
     async def offer(self, listing):
+        if self.webapp:
+            return None
         result = await self.get("/nfts/search", ids=str(UUID(listing.external_id)), status="listed", limit=1)
         raw = next((raw for raw in result["results"] if raw["id"] == listing.external_id), None)
         if not raw:
