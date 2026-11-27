@@ -73,11 +73,12 @@ function Art({signal,large=false}:{signal:Signal;large?:boolean}){
 }
 function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
  const d=signal.details
+ const profitable=Number(d.profit)>0
  return <button className="signal-card" onClick={onClick}>
   <div className="signal-media"><Art signal={signal}/><span className="strategy">{d.market}</span><span className="card-link"><ArrowUpRight size={16}/></span></div>
-  <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div>{signal.state!=='listed'&&<span className="roi">+{f(d.roi)}%</span>}</div>
+  <div className="signal-body"><div className="signal-heading"><div><strong>{d.title} <span>#{d.number}</span></strong><small>{d.model} · {d.backdrop}</small></div><span className="roi">{Number(d.roi)>0?'+':''}{f(d.roi)}%</span></div>
   <div className="gift-attributes"><span>{d.symbol}</span><span>{strategyNames[signal.strategy]}</span></div>
-  <div className="card-values"><div><small>{signal.state==='listed'?'Цена сейчас':'Покупка'}</small><b>{f(d.purchase)} {d.currency}</b></div>{signal.state!=='listed'&&<><div><small>Оценка продажи</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Прибыль</small><b className="green">+{f(d.profit)}</b></div></>}</div></div>
+  <div className="card-values"><div><small>Цена сейчас</small><b>{f(d.purchase)} {d.currency}</b></div><div><small>Ориентир выхода</small><b>{f(d.sale)} {d.currency}</b></div><div><small>Расчётная прибыль</small><b className={profitable?'green':''}>{profitable?'+':''}{f(d.profit)} {d.currency}</b></div></div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
