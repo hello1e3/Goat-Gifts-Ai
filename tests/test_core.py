@@ -263,6 +263,22 @@ async def test_mrkt_contract_pagination_and_nanoton_price():
     assert calls[1][1]["cursor"] == "next"
 
 
+async def test_portals_webapp_token_uses_public_api_contract():
+    requests = []
+
+    async def transport(request):
+        requests.append(request)
+        return httpx.Response(200, json={"results": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = Portals(client, "tma SYNTHETIC")
+        assert await adapter.listings() == []
+        assert await adapter.sales() == []
+
+    assert requests[0].url.path == "/api/nfts/search"
+    assert requests[0].headers["Authorization"] == "tma SYNTHETIC"
+
+
 async def test_market_unavailable_stale_and_restart(db):
     class Unavailable:
         name = "Portals"
