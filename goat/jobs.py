@@ -234,7 +234,7 @@ async def fanout(conn):
     """)
     now = datetime.now(UTC)
     subscribers = await rows(conn, """
-        select u.id,coalesce(p.prefs,'{"signals":true}'::jsonb) prefs
+        select u.id,coalesce(p.prefs,jsonb_build_object('signals',true)) prefs
         from users u left join user_settings p on p.user_id=u.id
         join subscriptions s on s.user_id=u.id where not u.blocked and not u.unreachable and not u.erased
           and s.frozen_at is null and coalesce((p.prefs->>'signals')::boolean,true) and exists (
