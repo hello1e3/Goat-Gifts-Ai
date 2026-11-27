@@ -21,8 +21,10 @@ def upgrade():
             actor bigint,
             grant_id bigint REFERENCES access_grants
         );
+    """)
+    op.execute("""
         CREATE INDEX manual_payments_pending ON manual_payments(created_at)
-            WHERE status='pending';
+            WHERE status='pending'
     """)
 
 
