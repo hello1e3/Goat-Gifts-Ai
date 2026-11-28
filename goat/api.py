@@ -244,7 +244,7 @@ def create_api(db, config, lifespan):
                 row['url'],row['transferable_at'],row['floor']) for row in peers]
         if isinstance(adapter,Portals):
             try:
-                extra = await asyncio.wait_for(adapter.comparables(listing),timeout=12)
+                comparison_checked_at, extra = await asyncio.wait_for(adapter.checked_comparables(listing),timeout=12)
                 pool = extra
             except (httpx.HTTPError,TimeoutError,ValueError,KeyError,TypeError):
                 raise HTTPException(503, "Не удалось проверить дешёвые аналоги. Прежняя оценка не подтверждена.")
@@ -256,7 +256,7 @@ def create_api(db, config, lifespan):
         sales = [Sale(row['market'],row['external_id'],Gift(**{k:row[k] for k in Gift.__dataclass_fields__}),
                       row['price'],row['currency'],row['sold_at']) for row in sold]
         details = listing_analysis(listing,pool,fee,sales=sales)
-        details['comparison_checked_at'] = datetime.now(UTC).isoformat()
+        details['comparison_checked_at'] = (comparison_checked_at if isinstance(adapter,Portals) else datetime.now(UTC)).isoformat()
         async with db.transaction() as conn:
             await store_gift(conn,listing.gift)
             await query(conn,"""update market_listings set price=:p,observed_at=now(),active=true

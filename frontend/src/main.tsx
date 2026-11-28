@@ -75,7 +75,7 @@ function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
   <div className="signal-body"><div className="signal-heading"><strong>{d.title}</strong><small>#{d.number}</small></div>
   <div className="gift-model">{d.model}</div>
   <div className="gift-price">{f(d.purchase)} <span>{d.currency}</span><ArrowUpRight size={13}/></div>
-  <div className="gift-profit"><small>Расчётная прибыль</small><b className={profitable?'positive':''}>{!checked?'Проверить оценку':d.profit==null?'Нет оценки':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div>
+  <div className="gift-profit"><small>Расчётная прибыль</small><b className={profitable?'positive':''}>{!checked?(d.verification_error?'Источник недоступен':'Рассчитываем…'):d.profit==null?'Нет оценки':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
@@ -126,13 +126,42 @@ function App(){
  const loadMe=async()=>{const data=await api<Profile>('/me');setMe(data);setPrefs(data.prefs);return data}
  const loadItems=async()=>{const [positions,history]=await Promise.all([api<Item[]>('/portfolio'),api<RecordData[]>('/portfolio/history')]);setItems(positions);setTransactions(history)}
  const liveFeed=async()=>{const current=activeSearch.current;const params=new URLSearchParams(current);const signals=await api<Signal[]>('/signals?'+params);if(current===activeSearch.current)setLive(signals)}
+ const catalogVerification=useRef(0)
+ async function verifyCatalog(entries:Signal[], generation:number){
+  // Two workers keep the page responsive and avoid flooding Portals.
+  const queue=[...entries]
+  async function worker(){
+   while(queue.length&&generation===catalogVerification.current){
+    const entry=queue.shift()!
+    if(entry.details.comparison_checked_at&&Date.now()-new Date(String(entry.details.comparison_checked_at)).getTime()<90000)continue
+    try{
+     const result=await api<{status:string;item?:Signal}>('/signals/'+entry.id+'/verify',post())
+     if(generation!==catalogVerification.current)return
+     setCatalogItems(current=>current.flatMap(item=>{
+      if(item.id!==entry.id)return [item]
+      if(!result.item)return []
+      const fresh={...result.item,id:entry.id}
+      const budget=Number(prefs?.limit_per_gift?Math.min(Number(prefs.capital),Number(prefs.max_cost)):prefs?.capital)
+      if(Number.isFinite(budget)&&Number(fresh.details.cost)>budget)return []
+      return [fresh]
+     }))
+    }catch{
+     if(generation===catalogVerification.current)setCatalogItems(current=>current.map(item=>{if(item.id!==entry.id)return item;const copy=structuredClone(item);copy.details.verification_error=true;return copy}))
+    }
+   }
+  }
+  await Promise.all([worker(),worker()])
+ }
  const catalogFeed=async(q='',page=1,reset=false)=>{
+  const generation=++catalogVerification.current
   const current=activeSearch.current
   const params=new URLSearchParams({...current,q,offset:String((page-1)*20),limit:'20',profitable:'false'})
   if(!reset&&catalogSession)params.set('session',catalogSession)
   const data=await api<{items:Signal[];has_more:boolean;total:number;session:string}>('/catalog?'+params)
   if(current!==activeSearch.current)return
+  if(generation!==catalogVerification.current)return
   setCatalogItems(data.items);setCatalogPage(page);setCatalogHasMore(data.has_more);setCatalogTotal(data.total);setCatalogSession(data.session)
+  void verifyCatalog(data.items,generation)
  }
  async function searchGifts(mode=scannerMode,q=searchInput){
   const version=++searchVersion.current
