@@ -79,7 +79,7 @@ async def catalog(conn, search="", offset=0, limit=60):
                'listed' as state,l.observed_at,a.details
         from market_listings l join gifts g on g.id=l.gift_id
         join market_analysis a on a.market=l.market and a.external_id=l.external_id
-        where l.market='Portals' and l.active
+        where l.market in ('Portals','MRKT') and l.active
           and l.observed_at>now()-interval '15 minutes'
           and (:search='' or concat_ws(' ',g.title,g.collection,g.model,g.backdrop,g.symbol,g.number)
                ilike '%'||:search||'%')

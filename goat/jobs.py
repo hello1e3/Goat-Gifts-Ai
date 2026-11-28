@@ -107,7 +107,7 @@ async def deliver(bot, conn, entry, app_url):
             data.update(media=d["image"], type="photo")
         actions = []
         if d.get("url"):
-            actions.append({"text": "🛒 Купить в Portals", "url": d["url"]})
+            actions.append({"text": f"🛒 Купить в {signal['listing_market']}", "url": d["url"]})
         if app_url:
             actions.append({"text": "📊 Открыть аналитику",
                             "web_app": WebAppInfo(url=f"{app_url.rstrip('/')}/?signal={signal['id']}")})

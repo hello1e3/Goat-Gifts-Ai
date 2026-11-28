@@ -174,16 +174,17 @@ def create_api(db, config, lifespan):
             cached = await rows(conn,"""select 'catalog:'||l.market||':'||l.external_id as id,
                 'floor' as strategy,'listed' as state,l.observed_at,a.details,l.external_id
                 from market_listings l join market_analysis a using(market,external_id)
-                where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'""")
+                where l.market in ('Portals','MRKT') and l.active
+                and l.observed_at>now()-interval '15 minutes'""")
             matching = filtered(cached,preferences,q,strategy,market,number,sort,thresholds=profitable)
             if not saved:
-                ids = [row['external_id'] for row in matching]
+                ids = [row['id'] for row in matching]
                 session = str(uuid4())
                 await query(conn,"""insert into catalog_sessions values(:s,:u,:q,cast(:ids as jsonb),now()+interval '10 minutes')""",
                             s=UUID(session),u=uid,q=signature,ids=json.dumps(ids))
             else:
                 ids = saved['ids']
-            by_id = {row['external_id']:row for row in matching}
+            by_id = {row['id']:row for row in matching}
             # Remove unavailable/changed lots but never let a page bypass current filters.
             ids = [id_ for id_ in ids if id_ in by_id]
             result = [by_id[id_] for id_ in ids[offset:offset+limit]]
@@ -199,7 +200,8 @@ def create_api(db, config, lifespan):
             return await rows(conn,"""select 'catalog:'||l.market||':'||l.external_id as id,
                 'floor' as strategy,'watch' as state,l.observed_at,a.details
                 from market_listings l join market_analysis a using(market,external_id)
-                where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'
+                where l.market in ('Portals','MRKT') and l.active
+                and l.observed_at>now()-interval '15 minutes'
                 and (a.details->>'cost')::numeric<=:budget
                 and not exists(select 1 from trading_signals t where t.listing_market=l.market
                     and t.listing_id=l.external_id and t.state in ('potential','active_offer')
@@ -208,9 +210,20 @@ def create_api(db, config, lifespan):
                 budget=prefs.budget)
 
     async def resolve_listing(conn, id_):
-        if id_.startswith('catalog:Portals:'):
-            from uuid import UUID
-            return 'Portals', str(UUID(id_.split(':',2)[2]))
+        if id_.startswith('catalog:'):
+            try:
+                _, market, external_id = id_.split(':', 2)
+            except ValueError:
+                raise HTTPException(422, "Некорректный идентификатор предложения")
+            if market not in {'Portals', 'MRKT'} or not external_id:
+                raise HTTPException(422, "Некорректный источник предложения")
+            if market == 'Portals':
+                from uuid import UUID
+                try:
+                    external_id = str(UUID(external_id))
+                except ValueError:
+                    raise HTTPException(422, "Некорректный идентификатор Portals")
+            return market, external_id
         item = await one(conn, "select listing_market,listing_id from trading_signals where id=:id",id=id_)
         if not item:
             raise HTTPException(404, "Идентификатор предложения неизвестен")
@@ -232,7 +245,7 @@ def create_api(db, config, lifespan):
             import asyncio
             listing = await asyncio.wait_for(adapter.get_listing(external_id), timeout=12)
         except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError):
-            raise HTTPException(503, "Не удалось связаться с Portals. Попробуйте позже.")
+            raise HTTPException(503, f"Не удалось связаться с {market}. Попробуйте позже.")
         if listing is None:
             async with db.transaction() as conn:
                 await query(conn,"update market_listings set active=false where market=:m and external_id=:e",m=market,e=external_id)

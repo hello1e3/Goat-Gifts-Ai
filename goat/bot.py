@@ -269,7 +269,7 @@ def make_dispatcher(db, config):
             data = await profile(conn, message.from_user.id)
             await EmojiManager.send(message.bot, conn, message.from_user.id, (
                 "GOAT NFT — аналитика и инструменты для Telegram Gifts.\n\n"
-                "Сервис ищет актуальные подарки на Portals, показывает дешёвые листинги, "
+                "Сервис ищет актуальные подарки на Portals и MRKT, показывает дешёвые листинги, "
                 "сравнивает цену с текущим floor и рассчитывает прибыль после комиссий. "
                 "В приложении доступны поиск по названию, модели и номеру, портфель и история наблюдений.\n\n"
                 + ("GOAT PRO активен. Откройте приложение или продлите доступ."

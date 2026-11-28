@@ -37,6 +37,44 @@ async def seed(conn,price='5'):
     return item
 
 
+async def seed_mrkt(conn, price='13'):
+    external_id='mrkt-listing-'+str(uuid4())
+    gift=Gift('mrkt-gift-'+external_id,'Plush Pepe',77,'Plush Pepe','Green','Blue','Star','1|2|3',None)
+    item=Listing('MRKT',external_id,gift,Decimal(price),'TON',
+                 f'https://t.me/mrkt/app?startapp={external_id}',None)
+    await store_gift(conn,gift)
+    await query(conn,"""insert into market_listings(market,external_id,gift_id,price,currency,url,observed_at)
+        values('MRKT',:id,:g,:p,'TON',:u,now())""",id=external_id,g=gift.id,p=item.price,u=item.url)
+    fees=dict(buy_fee='0',sell_fee='.02',transfer='0',network='0',conversion='0',extra_sell='0')
+    details=listing_analysis(item,[],fees)
+    await query(conn,"insert into market_analysis(market,external_id,details) values('MRKT',:id,cast(:d as jsonb))",
+                id=external_id,d=json.dumps(details,default=str))
+    return item
+
+
+async def test_mrkt_catalog_filter_and_verification(db):
+    async with db.transaction() as conn:
+        await register(conn,1,None,'Test')
+        await grant(conn,1,86400,'trial')
+        await save_prefs(conn,1,Preferences(capital=20,roi=0))
+        await seed(conn,'5')
+        target=await seed_mrkt(conn)
+    app=create_api(db,Config(bot_token=TOKEN,admin_ids='1'),lifespan)
+    class Adapter:
+        async def get_listing(self, external_id):
+            return target if external_id==target.external_id else None
+    app.state.market_adapters={'MRKT':Adapter()}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+        headers={'Authorization':'tma '+init_data(1)}
+        result=(await client.get('/api/catalog?market=MRKT',headers=headers)).json()
+        assert result['total']==1
+        assert result['items'][0]['id']==f'catalog:MRKT:{target.external_id}'
+        verified=await client.post('/api/signals/'+result['items'][0]['id']+'/verify',headers=headers)
+        assert verified.status_code==200
+        assert verified.json()['item']['details']['market']=='MRKT'
+        assert verified.json()['item']['details']['url'].startswith('https://t.me/mrkt/app?startapp=')
+
+
 async def test_catalog_sessions_recheck_and_portfolio_isolation(db):
     async with db.transaction() as conn:
         for uid in (1,2):

@@ -48,9 +48,10 @@ async def lifespan(app):
     async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
         status = {}
         adapters = []
-        # MRKT is intentionally paused: Portals is the only source shown to
-        # users until the MRKT contract is stable again.
-        status["MRKT"] = "disabled"
+        if config.mrkt_api_key:
+            adapters.append(MRKT(client, config.mrkt_api_key))
+        else:
+            status["MRKT"] = "key_required"
         if not config.portals_api_key:
             status["Portals"] = "key_required"
         elif not config.portals_api_key.startswith("tma ") and not config.portals_data_licensed:
