@@ -303,6 +303,25 @@ async def test_mrkt_contract_pagination_and_nanoton_price():
     assert calls[1][1]["cursor"] == "next"
 
 
+async def test_mrkt_exchanges_telegram_init_data_for_token():
+    requests = []
+
+    async def transport(request):
+        requests.append(request)
+        if request.url.path.endswith('/auth'):
+            assert json.loads(request.content) == {'data': 'signed-init-data'}
+            return httpx.Response(200, json={'token': 'FRESH'})
+        assert request.headers['Authorization'] == 'FRESH'
+        return httpx.Response(200, json={'gifts': [], 'cursor': ''})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = MRKT(client, 'tma signed-init-data')
+        assert await adapter.listings() == []
+        assert adapter.token == 'FRESH'
+
+    assert [request.url.path for request in requests] == ['/api/v1/auth', '/api/v1/gifts/saling']
+
+
 async def test_portals_webapp_token_uses_public_api_contract():
     requests = []
 

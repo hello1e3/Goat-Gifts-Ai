@@ -344,11 +344,28 @@ class Portals:
 class MRKT:
     name = "MRKT"
     endpoint = "https://api.tgmrkt.io/api/v1/gifts/saling"
+    auth_endpoint = "https://api.tgmrkt.io/api/v1/auth"
 
     def __init__(self, client: httpx.AsyncClient, token: str):
         self.client = client
-        self.token = token
+        self.init_data = token[4:].strip() if token.startswith("tma ") else None
+        self.token = None if self.init_data else token.strip()
         self.cache: dict[str, Listing] = {}
+
+    async def authenticate(self):
+        if self.token:
+            return self.token
+        if not self.init_data:
+            raise ValueError("MRKT credentials are missing")
+        response = await self.client.post(self.auth_endpoint, headers={
+            "Referer": "https://cdn.tgmrkt.io/", "User-Agent": "GOAT-NFT/1.0",
+        }, json={"data": self.init_data})
+        response.raise_for_status()
+        token = response.json().get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("MRKT authentication returned no token")
+        self.token = token.strip()
+        return self.token
 
     @staticmethod
     def field(raw, *names, default=""):
@@ -389,8 +406,9 @@ class MRKT:
                        f"https://t.me/mrkt/app?startapp={external_id}", None)
 
     async def page(self, cursor=""):
+        token = await self.authenticate()
         response = await self.client.post(self.endpoint, headers={
-            "Authorization": self.token,
+            "Authorization": token,
             "Referer": "https://cdn.tgmrkt.io/",
             "User-Agent": "GOAT-NFT/1.0",
         }, json={
