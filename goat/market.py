@@ -102,7 +102,7 @@ def listing_analysis(listing, listings, fees=None, target_roi=Decimal("5"), sale
         "exit_market": listing.market, "url": listing.url,
         "transferable_at": listing.transferable_at, "history": [],
         "risk": estimate['reference_basis'] + ('. Комиссии не настроены.' if fees is None else
-                 '. Сценарии основаны на распределении цен аналогов; срок продажи неизвестен.'),
+                 '. Цена объявления не гарантирует продажу; срок продажи неизвестен.'),
     }
 
 
@@ -150,6 +150,7 @@ class Portals:
         self.sales_offset = 0
         self.collection_ids = {}
         self.enriched_at = {}
+        self.comparison_cache = {}
 
     async def get(self, path, **params):
         async with self.lock:
@@ -264,7 +265,19 @@ class Portals:
         result = await self.get('/nfts/search',collection_ids=collection_id,
             filter_by_models=listing.gift.model,
             status='listed',sort_by='price asc',limit=100,offset=0)
-        return [self.listing(raw) for raw in result.get('results',[]) if raw.get('status')=='listed']
+        items = [self.listing(raw) for raw in result.get('results',[]) if raw.get('status')=='listed']
+        # Do not trust a remote filter silently ignored by a changed contract.
+        return [item for item in items if item.gift.collection.casefold()==listing.gift.collection.casefold()
+                and item.gift.model.casefold()==listing.gift.model.casefold()]
+
+    async def checked_comparables(self, listing):
+        key = (listing.gift.collection.casefold(), listing.gift.model.casefold())
+        checked, peers = self.comparison_cache.get(key, (None, []))
+        if checked is None or (datetime.now(UTC)-checked).total_seconds() > 90:
+            peers = await self.comparables(listing)
+            checked = datetime.now(UTC)
+            self.comparison_cache[key] = (checked, peers)
+        return checked, peers
 
     async def search(self, text, offset=0, limit=60):
         query = text.strip()[:80]
@@ -550,7 +563,19 @@ async def scan(db, adapters, status):
                        'collections_in_batch': len({item.gift.collection for item in current})}
         analyses, pending, offers = [], [], []
         for listing in current:
-            details = listing_analysis(listing, peers, fees.get(listing.market), engine=engine)
+            active_engine = engine
+            checked_at = None
+            adapter = by_name[listing.market]
+            if isinstance(adapter, Portals):
+                key = (listing.gift.collection.casefold(), listing.gift.model.casefold())
+                checked_at, model_peers = adapter.comparison_cache.get(key,(None,[]))
+                if checked_at and (datetime.now(UTC)-checked_at).total_seconds() <= 90:
+                    active_engine = FairValueEngine(model_peers,sales_data)
+                else:
+                    checked_at = None
+            details = listing_analysis(listing, peers, fees.get(listing.market), engine=active_engine)
+            if checked_at:
+                details['comparison_checked_at'] = checked_at.isoformat()
             diagnostics['insufficient'] += int(details['evidence'] == 'none')
             diagnostics['asks_only'] += int(details['evidence'] == 'asks')
             diagnostics['fees_missing'] += int(not details['fees_configured'])
@@ -571,6 +596,38 @@ async def scan(db, adapters, status):
         verified, changes = [], []
         for adapter in adapters:
             group = [(item,options) for item,options in pending if item.market==adapter.name]
+            checked_groups = {}
+            if isinstance(adapter, Portals):
+                # A current buy price alone is NOT a verified opportunity.
+                # Bound upstream work, rotate models, and fail closed on errors.
+                keys = lambda item: (item.gift.collection,item.gift.model)
+                ordered = sorted(group,key=lambda pair:adapter.enriched_at.get(keys(pair[0]),0))
+                for item,_ in ordered:
+                    key = keys(item)
+                    if key in checked_groups or len(checked_groups)>=6:
+                        continue
+                    adapter.enriched_at[key] = datetime.now(UTC).timestamp()
+                    try:
+                        checked_groups[key] = await adapter.checked_comparables(item)
+                    except (httpx.HTTPError,ValueError,KeyError,TypeError,ArithmeticError):
+                        checked_groups[key] = None
+                refreshed = []
+                for item,prior_options in group:
+                    checked = checked_groups.get(keys(item))
+                    if checked is None:
+                        continue
+                    checked_at, fresh_peers = checked
+                    fresh_engine = FairValueEngine(fresh_peers,sales_data)
+                    details = listing_analysis(item,fresh_peers,fees.get(item.market),engine=fresh_engine)
+                    details['comparison_checked_at'] = checked_at.isoformat()
+                    analyses.append(dict(m=item.market,e=item.external_id,d=details))
+                    options = candidates(item,sales_data,fresh_peers,None,fees,datetime.now(UTC),engine=fresh_engine)
+                    options += [option for option in prior_options if option[0]=='instant']
+                    for _,_,d in options:
+                        d['comparison_checked_at'] = checked_at.isoformat()
+                    if options:
+                        refreshed.append((item,options))
+                group = refreshed
             try:
                 if isinstance(adapter,Portals):
                     found_map = await adapter.get_listings([item.external_id for item,_ in group])
@@ -591,7 +648,7 @@ async def scan(db, adapters, status):
             await query(conn,"""insert into market_analysis(market,external_id,details)
                 select m,e,d from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,e text,d jsonb)
                 on conflict(market,external_id) do update set details=excluded.details,observed_at=now()""",
-                data=json.dumps(analyses,default=str))
+                data=json.dumps(list({(a['m'],a['e']):a for a in analyses}.values()),default=str))
             await query(conn,"""update trading_signals t set state='stale'
                 from jsonb_to_recordset(cast(:data as jsonb)) as x(m text,e text)
                 where t.listing_market=x.m and t.listing_id=x.e""",data=json.dumps(analyses,default=str))

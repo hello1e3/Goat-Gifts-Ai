@@ -37,7 +37,7 @@ const strategyNames:Record<string,string> = {floor:'Floor Flip',cross:'Cross-mar
 const statusNames:Record<string,string> = {license_required:'Ожидает разрешения',partner_contract_required:'Ожидает доступа',key_required:'Нужен API-ключ',unavailable:'Недоступен',disabled:'Отключён',online:'Подключён',stale:'Данные устарели',initializing:'Подключение'}
 const nav = [{name:'Главная',icon:LayoutDashboard},{name:'Сканер',icon:ScanLine},{name:'Портфель',icon:Wallet},{name:'Аналитика',icon:BarChart3},{name:'Профиль',icon:UserRound}]
 const metricLabels: Record<string,string> = {
- fair_value:'Рыночный ориентир', conservative_sale:'Консервативный сценарий цены', optimistic_sale:'Оптимистичный сценарий цены', optimistic_profit:'Оптимистичная прибыль',
+ model_floor:'Минимум той же модели', fair_value:'Ориентир выхода', conservative_sale:'Консервативный сценарий цены', optimistic_sale:'Оптимистичный сценарий цены', optimistic_profit:'Оптимистичная прибыль',
  cost:'Полная себестоимость', proceeds:'Чистая выручка', profit:'Расчётная прибыль', roi:'ROI, %',
  break_even:'Точка безубыточности', max_buy:'Максимальная цена покупки', conservative_profit:'Консервативная прибыль',
  transfer:'Перевод', buy_commission:'Комиссия покупки', sell_commission:'Комиссия продажи', fx_impact:'Влияние курса',
@@ -68,13 +68,14 @@ function Art({signal,large=false}:{signal:Signal;large?:boolean}){
 }
 function SignalCard({signal,onClick}:{signal:Signal;onClick:()=>void}){
  const d=signal.details
- const profitable=Number(d.profit)>0
+ const checked=!!d.comparison_checked_at&&Date.now()-new Date(String(d.comparison_checked_at)).getTime()<180000
+ const profitable=checked&&Number(d.profit)>0
  return <button className="signal-card" onClick={onClick}>
   <div className="signal-media"><Art signal={signal}/></div>
   <div className="signal-body"><div className="signal-heading"><strong>{d.title}</strong><small>#{d.number}</small></div>
   <div className="gift-model">{d.model}</div>
   <div className="gift-price">{f(d.purchase)} <span>{d.currency}</span><ArrowUpRight size={13}/></div>
-  <div className="gift-profit"><small>Расчётная прибыль</small><b className={profitable?'positive':''}>{d.profit==null?'Нет оценки':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div>
+  <div className="gift-profit"><small>Расчётная прибыль</small><b className={profitable?'positive':''}>{!checked?'Проверить оценку':d.profit==null?'Нет оценки':`${profitable?'+':''}${f(d.profit)} ${d.currency}`}</b></div></div>
  </button>
 }
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
@@ -127,7 +128,7 @@ function App(){
  const liveFeed=async()=>{const current=activeSearch.current;const params=new URLSearchParams(current);const signals=await api<Signal[]>('/signals?'+params);if(current===activeSearch.current)setLive(signals)}
  const catalogFeed=async(q='',page=1,reset=false)=>{
   const current=activeSearch.current
-  const params=new URLSearchParams({...current,q,offset:String((page-1)*20),limit:'20'})
+  const params=new URLSearchParams({...current,q,offset:String((page-1)*20),limit:'20',profitable:'false'})
   if(!reset&&catalogSession)params.set('session',catalogSession)
   const data=await api<{items:Signal[];has_more:boolean;total:number;session:string}>('/catalog?'+params)
   if(current!==activeSearch.current)return
@@ -177,6 +178,17 @@ function App(){
   if(page==='Владелец')void api<Record<string,unknown>>('/admin/diagnostics').then(setDiagnostics).catch(announce)
   if(page==='Аналитика'&&me?.active)void api<Signal[]>('/signals?past=true').then(setPast).catch(announce)
  },[page,period,me?.active])
+ useEffect(()=>{
+  if(!me?.active)return
+  const id=new URLSearchParams(window.location.search).get('signal')
+  if(id&&/^[a-f0-9]{64}$/.test(id)){
+   setToast('Проверяем подарок и дешёвые аналоги в Portals…')
+   void api<{status:string;item?:Signal}>('/signals/'+id+'/verify',post()).then(result=>{
+    if(result.item){setSelected(result.item);setToast('Оценка обновлена по текущим предложениям')}
+    else setToast('Подарок продан или снят с продажи')
+   }).catch(announce)
+  }
+ },[me?.active])
  const isDemo=!me?.active
  const source=isDemo?samples:live
  const searchable=isDemo?samples:(scannerMode==='opportunities'?live:catalogItems)
@@ -219,7 +231,13 @@ function App(){
   setToast(result.status==='available'?'Цена, наличие и оценка обновлены':'Лот продан или снят с продажи')
  }
  function openGift(signal:Signal){
-  setSelected(signal)
+  const fresh=signal.details.comparison_checked_at&&Date.now()-new Date(String(signal.details.comparison_checked_at)).getTime()<180000
+  const details={...signal.details}
+  if(!fresh){
+   for(const key of ['fair_value','model_floor','sale','profit','roi','proceeds','conservative_sale','conservative_profit','optimistic_sale','optimistic_profit','max_buy'])details[key]=null
+   details.risk='Оценка ещё не проверена по свежим дешёвым аналогам.'
+  }
+  setSelected({...signal,details})
   if(signal.state!=='demo')void run(()=>refreshGift(signal))
  }
  function signalGrid(entries:Signal[]){
@@ -259,7 +277,7 @@ function App(){
     <section className="signals-section"><div className="section-head"><div><h2>{isDemo?'Примеры подарков':'Последние сигналы'}</h2><p>{isDemo?'Для поиска нужна подписка':'Расчёт после комиссий · не гарантированная прибыль'}</p></div><button className="ghost" onClick={()=>change('Сканер')}>Все подарки <ArrowRight size={16}/></button></div>{signalGrid(source.slice(0,3))}</section>
    </>}
    {page==='Сканер'&&<>
-    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Для поиска откройте приложение через бота с активной подпиской.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Лоты Portals по вашему бюджету и сохранённым фильтрам. Обход рынка продолжается.'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
+    <div className="intro"><div><div className="eyebrow"><span/> СКАНЕР PORTALS</div><h1>{scannerMode==='opportunities'?'Выгодные предложения':'Весь рынок подарков'}</h1><p>{isDemo?'Для поиска откройте приложение через бота с активной подпиской.':scannerMode==='opportunities'?`Только положительные сигналы в пределах бюджета ${f(me?.prefs.capital)} GRAM · сеть TON.`:'Все лоты в пределах бюджета, включая убыточные и без оценки. Порог прибыли применяется во вкладке «Выгодные».'}</p></div><button className="ghost" onClick={()=>{setShowPrefs(true);change('Профиль')}}><Settings2 size={18}/> Бюджет и фильтры</button></div>
     <div className="segmented scanner-tabs"><button className={scannerMode==='opportunities'?'chosen':''} onClick={()=>{setScannerMode('opportunities');if(!isDemo)void searchGifts('opportunities')}}>Выгодные</button><button className={scannerMode==='market'?'chosen':''} onClick={()=>{setScannerMode('market');if(!isDemo)void searchGifts('market')}}>Весь рынок</button></div>
     <div className="panel filters"><Field label="Поиск подарка"><form className="search-box" role="search" onSubmit={e=>{e.preventDefault();if(!isDemo)void searchGifts()}}><Search size={17}/><input type="search" inputMode="search" enterKeyHint="search" value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="Название, номер, модель…" aria-label="Название подарка"/>{searchInput&&<button type="button" className="search-clear" aria-label="Очистить поиск" onClick={()=>{setSearchInput('');if(!isDemo)void searchGifts(scannerMode,'')}}><X size={15}/></button>}<button type="submit" className="search-submit" disabled={searching}>{searching?'Ищем…':'Найти'}</button></form></Field><Field label="Стратегия"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Все</option>{Object.entries(strategyNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></Field>
     <Field label="Маркетплейс"><select value={market} onChange={e=>setMarket(e.target.value)}><option value="all">Все доступные</option><option>Portals</option></select></Field>

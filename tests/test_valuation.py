@@ -157,3 +157,27 @@ async def test_portals_batch_verification_splits_requests_without_per_lot_calls(
         assert [len(c['ids'].split(',')) for c in calls]==[50,50,50,50,5]
         assert all(c['status']=='listed' for c in calls)
 
+
+def test_lucky_locket_8821_cannot_ignore_cheaper_model_competitor():
+    item=replace(listing('23'),gift=replace(listing().gift,number=8821,model='Hey Arnold'))
+    peers=[replace(item,external_id=str(i),price=Decimal(price),
+        gift=replace(item.gift,id=f'peer-{i}',number=164+i))
+        for i,price in enumerate(('49.99','61','65','10000'))]
+    peers.append(replace(item,external_id='cheapest',price=Decimal('19.88'),
+        gift=replace(item.gift,id='cheap',number=8932,backdrop='Different',symbol='Other')))
+    fees=dict(buy_fee='0',sell_fee='.02',transfer='0',network='0',conversion='0',extra_sell='0')
+    d=listing_analysis(item,peers,fees)
+    assert d['fair_value']==Decimal('19.88')
+    assert d['profit']==Decimal('-3.5176')
+    assert not candidates(item,[],peers,None,{'Portals':fees},datetime.now(UTC))
+
+
+def test_expensive_asks_cannot_turn_into_optimistic_resale_prediction():
+    item=listing('9')
+    peers=[replace(item,external_id=str(i),price=Decimal(price),
+        gift=replace(item.gift,id=f'peer-{i}',number=164+i))
+        for i,price in enumerate(('19.49','10000','10000','10000'))]
+    d=listing_analysis(item,peers,FEES)
+    assert d['fair_value']==Decimal('19.49')
+    assert d['optimistic_sale']==Decimal('19.49')
+

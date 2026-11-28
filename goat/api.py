@@ -155,14 +155,14 @@ def create_api(db, config, lifespan):
 
     @app.get("/api/catalog")
     async def gifts_catalog(uid: User, q: str = "", offset: int = 0, limit: int = 60, session: str = '',
-                            strategy: str = 'all', market: str = 'all', number: str = 'all', sort: str = 'latest'):
+                            strategy: str = 'all', market: str = 'all', number: str = 'all', sort: str = 'latest', profitable: bool = True):
         from uuid import UUID, uuid4
         offset, limit = max(0, offset), max(1, min(limit, 100))
         q = q.strip()[:80]
         async with db.transaction() as conn:
             access = await require_access(conn, uid)
             preferences = Preferences.model_validate(access['prefs'])
-            signature = json.dumps([q,strategy,market,number,sort,preferences.model_dump(mode='json')],sort_keys=True)
+            signature = json.dumps([q,strategy,market,number,sort,profitable,preferences.model_dump(mode='json')],sort_keys=True)
             await query(conn,"delete from catalog_sessions where expires_at<now()")
             try:
                 saved = await one(conn,"select * from catalog_sessions where id=:s and user_id=:u and search=:q",
@@ -175,7 +175,7 @@ def create_api(db, config, lifespan):
                 'floor' as strategy,'listed' as state,l.observed_at,a.details,l.external_id
                 from market_listings l join market_analysis a using(market,external_id)
                 where l.market='Portals' and l.active and l.observed_at>now()-interval '15 minutes'""")
-            matching = filtered(cached,preferences,q,strategy,market,number,sort,thresholds=True)
+            matching = filtered(cached,preferences,q,strategy,market,number,sort,thresholds=profitable)
             if not saved:
                 ids = [row['external_id'] for row in matching]
                 session = str(uuid4())
@@ -245,9 +245,9 @@ def create_api(db, config, lifespan):
         if isinstance(adapter,Portals):
             try:
                 extra = await asyncio.wait_for(adapter.comparables(listing),timeout=12)
-                pool = list({item.external_id:item for item in [*pool,*extra]}.values())
+                pool = extra
             except (httpx.HTTPError,TimeoutError,ValueError,KeyError,TypeError):
-                pass
+                raise HTTPException(503, "Не удалось проверить дешёвые аналоги. Прежняя оценка не подтверждена.")
         async with db.transaction() as conn:
             sold = await rows(conn,"""select g.*,s.market,s.external_id,s.price,s.currency,s.sold_at
                 from market_sales s join gifts g on g.id=s.gift_id
@@ -256,6 +256,7 @@ def create_api(db, config, lifespan):
         sales = [Sale(row['market'],row['external_id'],Gift(**{k:row[k] for k in Gift.__dataclass_fields__}),
                       row['price'],row['currency'],row['sold_at']) for row in sold]
         details = listing_analysis(listing,pool,fee,sales=sales)
+        details['comparison_checked_at'] = datetime.now(UTC).isoformat()
         async with db.transaction() as conn:
             await store_gift(conn,listing.gift)
             await query(conn,"""update market_listings set price=:p,observed_at=now(),active=true
@@ -268,6 +269,7 @@ def create_api(db, config, lifespan):
                         m=market,e=external_id)
             for strategy, state, estimate in candidates(listing, sales, pool, None,
                     {market:fee} if fee else {}, datetime.now(UTC)):
+                estimate['comparison_checked_at'] = details['comparison_checked_at']
                 identity = sha256(f"{market}/{external_id}/{strategy}/{estimate['exit_market']}".encode()).hexdigest()
                 await query(conn,"""insert into trading_signals
                     values(:id,:m,:listing,:strategy,cast(:d as jsonb),:state,now())

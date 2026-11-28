@@ -87,6 +87,10 @@ async def deliver(bot, conn, entry, app_url):
         if not access or not access["active"] or not access["prefs"].get("signals", True) or not signal:
             return False
         d = signal["details"]
+        if signal['listing_market']=='Portals':
+            checked = d.get('comparison_checked_at')
+            if not checked or (datetime.now(UTC)-datetime.fromisoformat(checked)).total_seconds()>180:
+                return False
         text = (f"🔎 ПОТЕНЦИАЛЬНО ВЫГОДНЫЙ ПОДАРОК\n\n"
                 f"🎁 {d['title']} #{d['number']}\n"
                 f"🎨 {d['model']} · {d['backdrop']} · {d['symbol']}\n\n"

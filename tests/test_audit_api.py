@@ -179,3 +179,47 @@ async def test_catalog_honors_budget_roi_collection_and_number_on_server(db):
         assert (await client.get('/api/catalog?market=MRKT',headers=headers)).json()['total']==0
         assert (await client.get('/api/catalog',params={'session':result['session'],'number':'rare'},headers=headers)).status_code==409
 
+async def test_scan_rejects_cached_profit_when_live_model_is_cheaper(db):
+    from goat.market import Portals,scan
+    from goat.db import scalar
+    async with db.transaction() as conn:
+        target=await seed(conn,'23')
+    expensive=[replace(target,external_id=str(uuid4()),price=Decimal(p),
+        gift=replace(target.gift,id=f'expensive-{i}',number=164+i))
+        for i,p in enumerate(('49.99','61','65','10000'))]
+    cheap=replace(target,external_id=str(uuid4()),price=Decimal('19.49'),
+        gift=replace(target.gift,id='cheap',number=8932,backdrop='Other'))
+    async with httpx.AsyncClient() as client:
+        adapter=Portals(client,'tma test')
+        async def listings():return [target,*expensive]
+        async def sales():return []
+        async def offer(item):return None
+        calls=0
+        async def comparables(item):
+            nonlocal calls
+            calls+=1
+            return expensive if calls==1 else [cheap,*expensive]
+        async def get_listings(ids):return {i.external_id:i for i in [target,*expensive] if i.external_id in ids}
+        adapter.listings=listings;adapter.sales=sales;adapter.offer=offer
+        adapter.comparables=comparables;adapter.get_listings=get_listings
+        await scan(db,[adapter],{})
+    async with db.transaction() as conn:
+        assert not await signals(conn,Preferences(capital=200))
+        d=await scalar(conn,'select details from market_analysis where external_id=:id',id=target.external_id)
+        assert Decimal(d['fair_value'])==Decimal('19.49')
+        assert Decimal(d['profit'])<0 and d['comparison_checked_at']
+
+
+async def test_catalog_allows_losses_without_changing_saved_roi(db):
+    async with db.transaction() as conn:
+        await register(conn,1,None,'Test');await grant(conn,1,86400,'trial')
+        await save_prefs(conn,1,Preferences(capital=20,roi=5))
+        item=await seed(conn,'10')
+        await query(conn,"update market_analysis set details=details||'{\"roi\":-10,\"profit\":-1}'::jsonb")
+    app=create_api(db,Config(bot_token=TOKEN,admin_ids='1'),lifespan)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+        headers={'Authorization':'tma '+init_data(1)}
+        assert (await client.get('/api/catalog',headers=headers)).json()['total']==0
+        result=(await client.get('/api/catalog?profitable=false',headers=headers)).json()
+        assert result['total']==1 and result['items'][0]['details']['profit']==-1
+

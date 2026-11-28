@@ -110,12 +110,19 @@ class FairValueEngine:
                           confidence='medium' if len(sold) < 10 else 'high',
                           reference_basis='Недавние продажи с совпадающими характеристиками')
         elif len(offered) >= 3:
-            result.update(fair_value=weighted(offered, '.25'), conservative_sale=lowest_ask,
-                          optimistic_sale=weighted(offered, '.75'), evidence='asks', confidence='low',
+            # Asking prices cannot establish a trait/serial premium. Even a
+            # large exact-match cohort must not hide a cheaper same-model lot.
+            model_peers = [a for k, values in self.models.items()
+                           if k[:4] == self.model_key(listing)[:4]
+                           for a in values if a.external_id != listing.external_id
+                           and a.gift.id != listing.gift.id]
+            lowest_ask = min([lowest_ask, *(a.price for a in model_peers)])
+            result.update(fair_value=lowest_ask, conservative_sale=lowest_ask, model_floor=lowest_ask,
+                          optimistic_sale=lowest_ask, evidence='asks', confidence='low',
                           reference_basis=('Обычные номера той же модели; премия редкого номера, фона и символа не оценена'
                               if match=='model_without_number_premium' else 'Объявления с той же моделью; премия фона и символа не оценена'
                               if match=='model' else 'Объявления с той же моделью и фоном; премия символа не оценена'
                               if match=='model_backdrop' else 'Объявления с совпадающими характеристиками')
-                              + '; предварительный расчёт, цена продажи не подтверждена')
+                              + '; ориентир не выше самого дешёвого конкурента той же модели; цена продажи не подтверждена')
         return result
 
